@@ -1,0 +1,24 @@
+# .NET build output
+**/bin/
+**/obj/
+
+# Fuzzing artifacts
+publish/
+findings/
+external/
+
+# Local files
+.claude/
+repro/
+reported/
+minimized.config
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
