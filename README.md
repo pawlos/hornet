@@ -339,6 +339,10 @@ Exceptions that are **not** filtered (real bugs that surface as crashes):
 - `AccessViolationException` — memory corruption
 - Any other unexpected exception
 
+## Troubleshooting
+
+See [docs/afl-troubleshooting.md](docs/afl-troubleshooting.md) for common AFL++ errors and warnings when fuzzing .NET targets, with fixes.
+
 ## Technical Notes
 
 ### ReadyToRun (R2R) Assemblies
