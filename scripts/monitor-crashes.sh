@@ -63,9 +63,9 @@ NC='\033[0m'
 
 # Known bugs database — each entry is "ExceptionType|StackFragment"
 # These are bugs already reported or otherwise accounted for.
-# Add entries here to suppress known bugs from the monitor output.
-# Format: "ExceptionType|PartialStackFrame"
 KNOWN_BUGS=(
+    # Add known bugs here to suppress them from the monitor output.
+    # Format: "ExceptionType|PartialStackFrame"
     # Example:
     # "DivideByZeroException|SomeLibrary.SomeMethod"
     # "NullReferenceException|AnotherLibrary.Parse"
@@ -247,8 +247,13 @@ run_scan() {
                                 continue
                             fi
 
-                            new_hang_count=$((new_hang_count + 1))
-                            total_hangs_new=$((total_hangs_new + 1))
+                            if is_known_bug "HANG" "infinite-loop"; then
+                                known_count=$((known_count + 1))
+                                total_known=$((total_known + 1))
+                            else
+                                new_hang_count=$((new_hang_count + 1))
+                                total_hangs_new=$((total_hangs_new + 1))
+                            fi
 
                             if [ "$WATCH_MODE" -eq 1 ]; then
                                 SEEN_SIGS["$watch_sig"]=1

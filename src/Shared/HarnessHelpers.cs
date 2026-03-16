@@ -50,12 +50,20 @@ public static class HarnessHelpers
     {
         // Check the full type hierarchy — e.g. YamlDotNet.Core.SyntaxErrorException
         // inherits from YamlException, so we need to walk up the chain.
-        // Add your target library's exception type names here.
         for (var type = ex.GetType(); type != null && type != typeof(Exception); type = type.BaseType)
         {
             var typeName = type.FullName ?? "";
             if (typeName.Contains("JsonException", StringComparison.Ordinal)
-                || typeName.Contains("JsonReaderException", StringComparison.Ordinal))
+                || typeName.Contains("JsonReaderException", StringComparison.Ordinal)
+                || typeName.Contains("YamlException", StringComparison.Ordinal)
+                || typeName.Contains("CsvHelper", StringComparison.Ordinal)
+                || typeName.Contains("ImageFormatException", StringComparison.Ordinal)
+                || typeName.Contains("UnknownImageFormatException", StringComparison.Ordinal)
+                || typeName.Contains("InvalidImageContentException", StringComparison.Ordinal)
+                || typeName.Contains("MessagePackSerializationException", StringComparison.Ordinal)
+                || typeName.Contains("ImageProcessingException", StringComparison.Ordinal)
+                || typeName.Contains("TextureFormatException", StringComparison.Ordinal)
+                || typeName.Contains("TextureProcessingException", StringComparison.Ordinal))
                 return true;
         }
         return false;

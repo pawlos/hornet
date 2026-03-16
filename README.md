@@ -256,12 +256,14 @@ Launches multiple AFL++ instances in parallel (1 main + N-1 secondary) for maxim
 
 Sequentially fuzzes all (or selected) harnesses with multi-core AFL++, auto-triaging after each. Ideal for overnight unattended runs.
 
-- Default: all published harnesses, 2 hours each, half of available cores
+- Default: all published harnesses, 2 hours each, quarter of available cores
 - Produces a summary report at `findings/.batch-report-<timestamp>.txt`
 - Ctrl+C stops the current harness and skips to shutdown
+- Automatic process cleanup between harnesses to prevent memory accumulation
+- Configurable per-instance memory limit (default 2GB)
 
 ```bash
-# Fuzz everything overnight (2h each, all cores)
+# Fuzz everything overnight (2h each)
 ./scripts/fuzz-batch.sh
 
 # Quick sweep — 30 min each
@@ -269,6 +271,9 @@ Sequentially fuzzes all (or selected) harnesses with multi-core AFL++, auto-tria
 
 # Specific targets only
 ./scripts/fuzz-batch.sh --duration 1h Harness.MyTarget Harness.AnotherTarget
+
+# Memory-constrained system
+./scripts/fuzz-batch.sh --cores 2 --memory-limit 1024
 
 # Preview without running
 ./scripts/fuzz-batch.sh --dry-run

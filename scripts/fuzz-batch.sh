@@ -8,7 +8,9 @@
 #
 # Options:
 #   --duration DURATION   Time per harness (default: 2h). Supports s/m/h suffixes.
-#   --cores N             AFL++ instances per harness (default: half of available)
+#   --cores N             AFL++ instances per harness (default: quarter of available, min 2)
+#   --memory-limit MB     RSS limit per AFL++ instance in MB (default: 2048).
+#                         Prevents OOM crashes on memory-constrained systems like WSL2.
 #   --skip-triage         Don't auto-triage after each harness
 #   --dry-run             Show what would run without actually fuzzing
 #
@@ -16,6 +18,7 @@
 #   ./scripts/fuzz-batch.sh                                    # All harnesses, 2h each
 #   ./scripts/fuzz-batch.sh --duration 30m Harness.ImageSharp  # One harness, 30 min
 #   ./scripts/fuzz-batch.sh --duration 1h --cores 4            # All, 1h each, 4 cores
+#   ./scripts/fuzz-batch.sh --memory-limit 1024                # 1GB per instance
 #   ./scripts/fuzz-batch.sh --dry-run                          # Preview the plan
 set -euo pipefail
 
@@ -27,6 +30,7 @@ DOTNET="$DOTNET_ROOT/dotnet"
 # Defaults
 DURATION="2h"
 CORES=0
+MEMORY_LIMIT=2048  # MB per AFL++ instance
 SKIP_TRIAGE=false
 DRY_RUN=false
 HARNESSES=()
@@ -34,15 +38,16 @@ HARNESSES=()
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --duration|-d)  DURATION="$2"; shift 2 ;;
-        --cores|-c)     CORES="$2"; shift 2 ;;
-        --skip-triage)  SKIP_TRIAGE=true; shift ;;
-        --dry-run)      DRY_RUN=true; shift ;;
+        --duration|-d)       DURATION="$2"; shift 2 ;;
+        --cores|-c)          CORES="$2"; shift 2 ;;
+        --memory-limit|-m)   MEMORY_LIMIT="$2"; shift 2 ;;
+        --skip-triage)       SKIP_TRIAGE=true; shift ;;
+        --dry-run)           DRY_RUN=true; shift ;;
         --help|-h)
             sed -n '2,/^set /{ /^#/s/^# \?//p }' "$0"
             exit 0
             ;;
-        *)              HARNESSES+=("$1"); shift ;;
+        *)                   HARNESSES+=("$1"); shift ;;
     esac
 done
 
@@ -61,10 +66,10 @@ parse_duration() {
 
 DURATION_SECS=$(parse_duration "$DURATION")
 
-# Auto-detect cores
+# Auto-detect cores — use quarter of available (not half) to reduce memory pressure
 if [ "$CORES" -eq 0 ]; then
     AVAILABLE=$(nproc)
-    CORES=$(( AVAILABLE / 2 ))
+    CORES=$(( AVAILABLE / 4 ))
     [ "$CORES" -lt 2 ] && CORES=2
 fi
 
@@ -140,6 +145,7 @@ echo "=== Hornet Batch Runner ==="
 echo "Harnesses:  $TOTAL"
 echo "Duration:   $DURATION each ($(format_time $TOTAL_TIME) total)"
 echo "Cores:      $CORES per harness"
+echo "Memory:     ${MEMORY_LIMIT}MB per AFL++ instance ($(( MEMORY_LIMIT * CORES ))MB max total)"
 echo "Triage:     $([ "$SKIP_TRIAGE" = true ] && echo "disabled" || echo "after each run")"
 echo ""
 echo "Schedule:"
@@ -156,10 +162,11 @@ if [ "$DRY_RUN" = true ]; then
 fi
 
 # Results tracking
+mkdir -p "$ROOT_DIR/findings"
 REPORT_FILE="$ROOT_DIR/findings/.batch-report-$(date '+%Y%m%d-%H%M%S').txt"
 echo "Hornet Batch Report — $(date)" > "$REPORT_FILE"
 echo "Duration per harness: $DURATION ($DURATION_SECS seconds)" >> "$REPORT_FILE"
-echo "Cores: $CORES" >> "$REPORT_FILE"
+echo "Cores: $CORES, Memory limit: ${MEMORY_LIMIT}MB/instance" >> "$REPORT_FILE"
 echo "" >> "$REPORT_FILE"
 
 BATCH_START=$(date +%s)
@@ -172,6 +179,45 @@ export AFL_TMPDIR="${AFL_TMPDIR:-/tmp}"
 export AFL_NO_UI=1
 export DOTNET_TieredCompilation=0
 export DOTNET_ReadyToRun=0
+
+# Kill any stray AFL++ or dotnet processes from previous runs.
+# Only kills processes owned by the current user.
+cleanup_processes() {
+    local killed=0
+
+    # Kill afl-fuzz instances
+    if pkill -u "$(id -u)" -f "afl-fuzz" 2>/dev/null; then
+        killed=1
+    fi
+
+    # Kill orphaned dotnet processes running harness DLLs
+    if pkill -u "$(id -u)" -f "dotnet.*Harness\." 2>/dev/null; then
+        killed=1
+    fi
+
+    # Kill orphaned self-contained harness processes
+    if pkill -u "$(id -u)" -f "publish/Harness\." 2>/dev/null; then
+        killed=1
+    fi
+
+    if [ "$killed" -eq 1 ]; then
+        # Give processes time to exit
+        sleep 2
+        # Force-kill any survivors
+        pkill -9 -u "$(id -u)" -f "afl-fuzz" 2>/dev/null || true
+        pkill -9 -u "$(id -u)" -f "dotnet.*Harness\." 2>/dev/null || true
+        pkill -9 -u "$(id -u)" -f "publish/Harness\." 2>/dev/null || true
+        sleep 1
+    fi
+
+    # Drop filesystem caches to reclaim memory (best-effort, needs root)
+    if [ -w /proc/sys/vm/drop_caches ]; then
+        echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    fi
+
+    # Clean up AFL++ temp files
+    rm -f /tmp/.afl-* 2>/dev/null || true
+}
 
 run_harness() {
     local harness="$1"
@@ -201,8 +247,8 @@ run_harness() {
 
     local pids=()
 
-    # Launch main
-    afl-fuzz -i "$corpus_dir" -o "$findings_dir" -t 5000 -M main \
+    # Launch main (with memory limit)
+    afl-fuzz -i "$corpus_dir" -o "$findings_dir" -t 5000 -m "$MEMORY_LIMIT" -M main \
         "${dict_args[@]}" -- "${target_cmd[@]}" \
         > "$log_dir/main.log" 2>&1 &
     pids+=($!)
@@ -211,7 +257,7 @@ run_harness() {
 
     # Launch secondaries
     for i in $(seq 1 $((CORES - 1))); do
-        afl-fuzz -i "$corpus_dir" -o "$findings_dir" -t 5000 -S "secondary$i" \
+        afl-fuzz -i "$corpus_dir" -o "$findings_dir" -t 5000 -m "$MEMORY_LIMIT" -S "secondary$i" \
             "${dict_args[@]}" -- "${target_cmd[@]}" \
             > "$log_dir/secondary$i.log" 2>&1 &
         pids+=($!)
@@ -221,9 +267,29 @@ run_harness() {
     # Wait for duration
     sleep "$DURATION_SECS"
 
-    # Stop all instances
+    # Stop all instances gracefully
     for pid in "${pids[@]}"; do
         kill "$pid" 2>/dev/null || true
+    done
+
+    # Wait up to 10 seconds for graceful shutdown
+    local waited=0
+    while [ "$waited" -lt 10 ]; do
+        local alive=0
+        for pid in "${pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                alive=1
+                break
+            fi
+        done
+        [ "$alive" -eq 0 ] && break
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    # Force-kill any survivors
+    for pid in "${pids[@]}"; do
+        kill -9 "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null || true
 
@@ -244,6 +310,10 @@ run_harness() {
 
     echo "$crashes|$paths"
 }
+
+# Clean up before starting — kill leftovers from previous aborted runs
+echo "Cleaning up stale processes..."
+cleanup_processes
 
 # Main loop
 for i in "${!HARNESSES[@]}"; do
@@ -277,6 +347,10 @@ for i in "${!HARNESSES[@]}"; do
 
     # Log to report
     printf "%-30s  %s paths, %s  (%s)\n" "$harness" "$paths" "$crashes_info" "$(format_time $elapsed)" >> "$REPORT_FILE"
+
+    # Clean up between harnesses to prevent memory accumulation
+    echo "  Cleaning up..."
+    cleanup_processes
     echo ""
 done
 

@@ -9,6 +9,14 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 export DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}"
 DOTNET="$DOTNET_ROOT/dotnet"
 
+# Parse optional flags
+while getopts "" opt; do
+    case $opt in
+        *) echo "Usage: fuzz-afl.sh <harness-name> <corpus-dir> [extra-afl-args...]"; exit 1 ;;
+    esac
+done
+shift $((OPTIND - 1))
+
 HARNESS_NAME="${1:?Usage: fuzz-afl.sh <harness-name> <corpus-dir> [extra-afl-args...]}"
 CORPUS_DIR="${2:?Usage: fuzz-afl.sh <harness-name> <corpus-dir> [extra-afl-args...]}"
 shift 2
@@ -90,6 +98,7 @@ exec afl-fuzz \
     -i "$INPUT_ARG" \
     -o "$FINDINGS_DIR" \
     -t 5000 \
+    -m none \
     "${DICT_ARGS[@]}" \
     "${EXTRA_ARGS[@]}" \
     -- "${TARGET_CMD[@]}"
