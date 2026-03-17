@@ -294,7 +294,7 @@ run_harness() {
     wait 2>/dev/null || true
 
     # Count results
-    local crashes=0 paths=0
+    local crashes=0 paths=0 total_execs=0 max_speed=0
     for dir in "$findings_dir"/*/; do
         [ -d "$dir" ] || continue
         local instance
@@ -306,9 +306,18 @@ run_harness() {
         q=$(find "$dir/queue" -maxdepth 1 -type f 2>/dev/null | wc -l)
         crashes=$((crashes + c))
         paths=$((paths + q))
+
+        # Aggregate exec stats from fuzzer_stats
+        if [ -f "$dir/fuzzer_stats" ]; then
+            local execs speed
+            execs=$(grep "^execs_done" "$dir/fuzzer_stats" 2>/dev/null | awk '{print $3}')
+            speed=$(grep "^execs_per_sec" "$dir/fuzzer_stats" 2>/dev/null | head -1 | awk '{print $3}' | cut -d. -f1)
+            total_execs=$((total_execs + ${execs:-0}))
+            [ "${speed:-0}" -gt "$max_speed" ] 2>/dev/null && max_speed=$speed
+        fi
     done
 
-    echo "$crashes|$paths"
+    echo "$crashes|$paths|$total_execs|$max_speed"
 }
 
 # Clean up before starting — kill leftovers from previous aborted runs
@@ -326,9 +335,12 @@ for i in "${!HARNESSES[@]}"; do
     result=$(run_harness "$harness")
     crashes=$(echo "$result" | cut -d'|' -f1)
     paths=$(echo "$result" | cut -d'|' -f2)
+    total_execs=$(echo "$result" | cut -d'|' -f3)
+    peak_speed=$(echo "$result" | cut -d'|' -f4)
 
     elapsed=$(( $(date +%s) - start_time ))
-    echo "  Done in $(format_time $elapsed): $paths paths, $crashes crashes"
+    execs_k=$((total_execs / 1000))
+    echo "  Done in $(format_time $elapsed): $paths paths, $crashes crashes, ${execs_k}K execs, ~${peak_speed} exec/sec"
 
     # Auto-triage if crashes found
     if [ "$SKIP_TRIAGE" = false ] && [ "$crashes" -gt 0 ]; then
@@ -346,7 +358,7 @@ for i in "${!HARNESSES[@]}"; do
     fi
 
     # Log to report
-    printf "%-30s  %s paths, %s  (%s)\n" "$harness" "$paths" "$crashes_info" "$(format_time $elapsed)" >> "$REPORT_FILE"
+    printf "%-30s  %s paths, %s, %sK execs, ~%s exec/sec  (%s)\n" "$harness" "$paths" "$crashes_info" "$execs_k" "$peak_speed" "$(format_time $elapsed)" >> "$REPORT_FILE"
 
     # Clean up between harnesses to prevent memory accumulation
     echo "  Cleaning up..."

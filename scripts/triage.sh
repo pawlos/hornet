@@ -23,20 +23,23 @@ NC='\033[0m'
 
 triage_harness() {
     local harness_name="$1"
-    local crashes_dir="$ROOT_DIR/findings/$harness_name/default/crashes"
-    local triage_dir="$ROOT_DIR/findings/$harness_name/triage"
+    local findings_base="$ROOT_DIR/findings/$harness_name"
+    local triage_dir="$findings_base/triage"
     local publish_dir="$ROOT_DIR/publish/$harness_name"
     local harness_dll="$publish_dir/$harness_name.dll"
 
-    if [ ! -d "$crashes_dir" ]; then
-        return
-    fi
-
-    # Count crash files (exclude README.txt that AFL++ creates)
+    # Collect crash files from all instances (default, main, secondary*)
     local crash_files=()
-    while IFS= read -r -d '' f; do
-        crash_files+=("$f")
-    done < <(find "$crashes_dir" -maxdepth 1 -type f ! -name "README*" -print0 2>/dev/null | sort -z)
+    for instance_dir in "$findings_base"/*/; do
+        [ -d "$instance_dir/crashes" ] || continue
+        local instance
+        instance=$(basename "$instance_dir")
+        [[ "$instance" == .* ]] && continue
+        [[ "$instance" == "triage" ]] && continue
+        while IFS= read -r -d '' f; do
+            crash_files+=("$f")
+        done < <(find "$instance_dir/crashes" -maxdepth 1 -type f ! -name "README*" -print0 2>/dev/null)
+    done
 
     if [ ${#crash_files[@]} -eq 0 ]; then
         return
@@ -158,21 +161,26 @@ for findings_dir in "$ROOT_DIR"/findings/*/; do
         continue
     fi
 
-    crashes_dir="$findings_dir/default/crashes"
-    if [ -d "$crashes_dir" ]; then
-        crash_count=$(find "$crashes_dir" -maxdepth 1 -type f ! -name "README*" 2>/dev/null | wc -l)
-        if [ "$crash_count" -gt 0 ]; then
-            found_any=1
-            triage_harness "$harness_name"
-        fi
+    # Check all instance dirs (default, main, secondary*) for crashes
+    crash_count=0
+    for instance_dir in "$findings_dir"/*/; do
+        [ -d "$instance_dir/crashes" ] || continue
+        inst=$(basename "$instance_dir")
+        [[ "$inst" == .* || "$inst" == "triage" ]] && continue
+        c=$(find "$instance_dir/crashes" -maxdepth 1 -type f ! -name "README*" 2>/dev/null | wc -l)
+        crash_count=$((crash_count + c))
+    done
+    if [ "$crash_count" -gt 0 ]; then
+        found_any=1
+        triage_harness "$harness_name"
     fi
 done
 
 if [ "$found_any" -eq 0 ]; then
     echo "No crashes found."
     if [ -n "$HARNESS_FILTER" ]; then
-        echo "Checked: findings/$HARNESS_FILTER/default/crashes/"
+        echo "Checked: findings/$HARNESS_FILTER/*/crashes/"
     else
-        echo "Checked: findings/*/default/crashes/"
+        echo "Checked: findings/*/*/crashes/"
     fi
 fi
