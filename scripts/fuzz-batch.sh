@@ -216,7 +216,7 @@ cleanup_processes() {
     fi
 
     # Clean up AFL++ temp files
-    rm -f /tmp/.afl-* 2>/dev/null || true
+    rm -f /tmp/.afl-* /tmp/.cur_input 2>/dev/null || true
 }
 
 run_harness() {
@@ -329,8 +329,9 @@ for i in "${!HARNESSES[@]}"; do
     harness="${HARNESSES[$i]}"
     step=$((i + 1))
 
-    echo "=== [$step/$TOTAL] $harness ($DURATION, $CORES cores) ==="
     start_time=$(date +%s)
+    end_est=$(date -d "+${DURATION_SECS} seconds" '+%H:%M' 2>/dev/null || date -r $((start_time + DURATION_SECS)) '+%H:%M' 2>/dev/null || echo "?")
+    echo "=== [$step/$TOTAL] $harness ($DURATION, $CORES cores) === started $(date '+%H:%M'), ETA $end_est"
 
     result=$(run_harness "$harness")
     crashes=$(echo "$result" | cut -d'|' -f1)
