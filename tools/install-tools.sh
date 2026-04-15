@@ -7,10 +7,19 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 export DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}"
 export PATH="$PATH:$DOTNET_ROOT:$DOTNET_ROOT/tools"
 
+# Download dotnet-install.sh if not present
+DOTNET_INSTALL="$SCRIPT_DIR/dotnet-install.sh"
+if [ ! -f "$DOTNET_INSTALL" ]; then
+    echo "=== Downloading dotnet-install.sh ==="
+    curl -sSL https://dot.net/v1/dotnet-install.sh -o "$DOTNET_INSTALL"
+    chmod +x "$DOTNET_INSTALL"
+    echo ""
+fi
+
 # Install .NET SDK if not present
 if ! command -v dotnet &>/dev/null; then
     echo "=== Installing .NET 10 SDK ==="
-    curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0 --install-dir "$DOTNET_ROOT"
+    "$DOTNET_INSTALL" --channel 10.0 --install-dir "$DOTNET_ROOT"
 
     # Persist to ~/.bashrc if not already there
     if ! grep -q 'DOTNET_ROOT' ~/.bashrc 2>/dev/null; then
@@ -26,7 +35,7 @@ fi
 # SharpFuzz global tool targets net9.0 — install the runtime if missing
 if ! dotnet --list-runtimes 2>/dev/null | grep -q 'Microsoft.NETCore.App 9\.'; then
     echo "=== Installing .NET 9 runtime (required by SharpFuzz) ==="
-    curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 9.0 --runtime dotnet --install-dir "$DOTNET_ROOT"
+    "$DOTNET_INSTALL" --channel 9.0 --runtime dotnet --install-dir "$DOTNET_ROOT"
     echo ""
 fi
 

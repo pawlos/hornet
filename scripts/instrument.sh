@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 export DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}"
 export PATH="$PATH:$DOTNET_ROOT:$DOTNET_ROOT/tools"
+export DOTNET_ROLL_FORWARD=Major
 
 HARNESS_NAME="${1:?Usage: instrument.sh <harness-name> [dll1 dll2 ...]}"
 shift
@@ -62,6 +63,10 @@ dotnet build "$STRIP_R2R_DIR" -c Release -v quiet
 
 echo ""
 echo "=== Publishing $HARNESS_NAME (framework-dependent) ==="
+# Remove target DLLs before publishing so dotnet publish always writes a fresh copy
+for dll in "${DLLS_TO_INSTRUMENT[@]}"; do
+    rm -f "$PUBLISH_DIR/$dll"
+done
 dotnet publish "$HARNESS_DIR" \
     -c Release \
     -o "$PUBLISH_DIR" \
@@ -79,8 +84,8 @@ echo "=== Instrumenting DLLs ==="
 for dll in "${DLLS_TO_INSTRUMENT[@]}"; do
     dll_path="$PUBLISH_DIR/$dll"
 
-    # If the DLL isn't in the publish dir, copy it from the shared framework
-    if [ ! -f "$dll_path" ] && [ -n "$FRAMEWORK_DIR" ] && [ -f "$FRAMEWORK_DIR/$dll" ]; then
+    # If the DLL exists in the shared framework, always copy fresh to avoid re-instrumenting a stale copy
+    if [ -n "$FRAMEWORK_DIR" ] && [ -f "$FRAMEWORK_DIR/$dll" ]; then
         echo "Copying BCL DLL from framework: $dll"
         cp "$FRAMEWORK_DIR/$dll" "$dll_path"
     fi
