@@ -3,6 +3,8 @@ using Newtonsoft.Json.Linq;
 using DotNetFuzzing.Shared;
 using SharpFuzz;
 
+HarnessHelpers.AddExpectedExceptionPatterns("JsonException");
+
 // Out-of-process fuzzing: AFL++ forks the process, sends mutated input via stdin.
 // SharpFuzz handles the fork server protocol and coverage feedback.
 Fuzzer.OutOfProcess.Run(stream =>
