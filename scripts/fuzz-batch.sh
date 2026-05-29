@@ -175,7 +175,11 @@ BATCH_START=$(date +%s)
 export AFL_SKIP_CPUFREQ=1
 export AFL_SKIP_BIN_CHECK=1
 export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
-export AFL_TMPDIR="${AFL_TMPDIR:-/tmp}"
+# Per-instance AFL_TMPDIR root. Each parallel instance gets its own subdir under
+# here ($AFL_TMP_BASE/<harness>/<instance>); a shared dir makes secondaries abort
+# because AFL refuses to start when <AFL_TMPDIR>/.cur_input already exists. Must
+# be under /tmp — /mnt/c can't ftruncate.
+AFL_TMP_BASE="${AFL_TMPDIR_BASE:-/tmp/afl-tmp}"
 export AFL_NO_UI=1
 export DOTNET_TieredCompilation=0
 export DOTNET_ReadyToRun=0
@@ -215,7 +219,8 @@ cleanup_processes() {
         echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
     fi
 
-    # Clean up AFL++ temp files
+    # Clean up AFL++ temp files (per-instance tmpdirs + legacy shared staging file)
+    rm -rf "$AFL_TMP_BASE"/* 2>/dev/null || true
     rm -f /tmp/.afl-* /tmp/.cur_input 2>/dev/null || true
 }
 
@@ -247,17 +252,24 @@ run_harness() {
 
     local pids=()
 
-    # Launch main (with memory limit)
-    afl-fuzz -i "$corpus_dir" -o "$findings_dir" -t 5000 -m "$MEMORY_LIMIT" -M main \
+    # Per-instance AFL_TMPDIR root for this harness (cleared per instance below).
+    local tmp_base="$AFL_TMP_BASE/$harness"
+
+    # Launch main (with memory limit) in its own AFL_TMPDIR
+    mkdir -p "$tmp_base/main"; rm -f "$tmp_base/main/.cur_input"
+    AFL_TMPDIR="$tmp_base/main" \
+        afl-fuzz -i "$corpus_dir" -o "$findings_dir" -t 5000 -m "$MEMORY_LIMIT" -M main \
         "${dict_args[@]}" -- "${target_cmd[@]}" \
         > "$log_dir/main.log" 2>&1 &
     pids+=($!)
 
     sleep 2
 
-    # Launch secondaries
+    # Launch secondaries, each in its own AFL_TMPDIR
     for i in $(seq 1 $((CORES - 1))); do
-        afl-fuzz -i "$corpus_dir" -o "$findings_dir" -t 5000 -m "$MEMORY_LIMIT" -S "secondary$i" \
+        mkdir -p "$tmp_base/secondary$i"; rm -f "$tmp_base/secondary$i/.cur_input"
+        AFL_TMPDIR="$tmp_base/secondary$i" \
+            afl-fuzz -i "$corpus_dir" -o "$findings_dir" -t 5000 -m "$MEMORY_LIMIT" -S "secondary$i" \
             "${dict_args[@]}" -- "${target_cmd[@]}" \
             > "$log_dir/secondary$i.log" 2>&1 &
         pids+=($!)

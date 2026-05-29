@@ -57,7 +57,13 @@ fi
 export AFL_SKIP_CPUFREQ=1
 export AFL_SKIP_BIN_CHECK=1
 export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
-export AFL_TMPDIR="${AFL_TMPDIR:-/tmp}"  # WSL2: /mnt/c doesn't support ftruncate
+# Dedicated per-harness AFL_TMPDIR. AFL stages the test case as
+# <AFL_TMPDIR>/.cur_input and aborts on startup if that file already exists, so a
+# leftover from a kill -9'd prior run would wedge the next run. Use a per-harness
+# dir (not bare /tmp) and clear any stale staging file before launch. Must be
+# under /tmp — /mnt/c can't ftruncate.
+export AFL_TMPDIR="${AFL_TMPDIR:-${AFL_TMPDIR_BASE:-/tmp/afl-tmp}/$HARNESS_NAME}"
+mkdir -p "$AFL_TMPDIR"; rm -f "$AFL_TMPDIR/.cur_input"
 export AFL_NO_UI="${AFL_NO_UI:-0}"
 
 # Reduce .NET JIT non-determinism that causes AFL++ instability warnings

@@ -77,7 +77,11 @@ mkdir -p "$FINDINGS_DIR"
 export AFL_SKIP_CPUFREQ=1
 export AFL_SKIP_BIN_CHECK=1
 export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
-export AFL_TMPDIR="${AFL_TMPDIR:-/tmp}"
+# Each parallel instance needs its OWN AFL_TMPDIR. AFL stages the current test
+# case as <AFL_TMPDIR>/.cur_input and aborts on startup if that file already
+# exists, so a shared dir makes every secondary die on launch. Must live under
+# /tmp — /mnt/c can't ftruncate. Per-instance dirs are created at launch below.
+AFL_TMP_BASE="${AFL_TMPDIR_BASE:-/tmp/afl-tmp}/$HARNESS_NAME"
 export AFL_NO_UI=1  # Must use no-UI for parallel (only one can own the terminal)
 export DOTNET_TieredCompilation=0
 export DOTNET_ReadyToRun=0
@@ -118,6 +122,15 @@ PIDS=()
 LOG_DIR="$FINDINGS_DIR/.logs"
 mkdir -p "$LOG_DIR"
 
+# Prepare a clean, per-instance AFL_TMPDIR and echo its path. Each instance must
+# get its own so they don't fight over a shared .cur_input (see AFL_TMP_BASE note).
+instance_tmpdir() {
+    local d="$AFL_TMP_BASE/$1"
+    mkdir -p "$d"
+    rm -f "$d/.cur_input"   # clear any stale file left by a kill -9'd prior run
+    echo "$d"
+}
+
 cleanup() {
     echo ""
     echo "=== Stopping all instances ==="
@@ -150,6 +163,9 @@ cleanup() {
     echo "  Total crashes (may include duplicates): $total_crashes"
     echo ""
     echo "Run ./scripts/triage.sh $HARNESS_NAME to deduplicate and classify."
+
+    # Remove this harness's per-instance AFL_TMPDIR tree so a later run starts clean.
+    rm -rf "$AFL_TMP_BASE" 2>/dev/null || true
     exit 0
 }
 
@@ -157,7 +173,7 @@ trap cleanup SIGINT SIGTERM
 
 # Launch main instance
 echo "Starting main instance..."
-afl-fuzz \
+AFL_TMPDIR="$(instance_tmpdir main)" afl-fuzz \
     -i "$CORPUS_DIR" \
     -o "$FINDINGS_DIR" \
     -t 5000 \
@@ -174,7 +190,7 @@ sleep 2
 # Launch secondary instances
 for i in $(seq 1 $((CORES - 1))); do
     echo "Starting secondary$i..."
-    afl-fuzz \
+    AFL_TMPDIR="$(instance_tmpdir "secondary$i")" afl-fuzz \
         -i "$CORPUS_DIR" \
         -o "$FINDINGS_DIR" \
         -t 5000 \
