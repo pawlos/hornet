@@ -9,8 +9,11 @@
 # Options:
 #   --duration DURATION   Time per harness (default: 2h). Supports s/m/h suffixes.
 #   --cores N             AFL++ instances per harness (default: quarter of available, min 2)
-#   --memory-limit MB     RSS limit per AFL++ instance in MB (default: 2048).
-#                         Prevents OOM crashes on memory-constrained systems like WSL2.
+#   --memory-limit MB     Virtual address-space cap per AFL++ instance in MB (default: 8192).
+#                         This is AFL's -m (RLIMIT_AS), not committed RAM. .NET reserves
+#                         multi-GB of address space at startup, so values <4096 make every
+#                         .NET harness crash the dry-run. Bound runaway allocations on
+#                         memory-constrained systems like WSL2 without starving .NET.
 #   --skip-triage         Don't auto-triage after each harness
 #   --dry-run             Show what would run without actually fuzzing
 #
@@ -30,7 +33,11 @@ DOTNET="$DOTNET_ROOT/dotnet"
 # Defaults
 DURATION="2h"
 CORES=0
-MEMORY_LIMIT=2048  # MB per AFL++ instance
+MEMORY_LIMIT=8192  # MB per AFL++ instance. NOTE: AFL's -m caps virtual ADDRESS SPACE
+                   # (RLIMIT_AS), not committed RAM. .NET reserves multi-GB of address
+                   # space at startup (but commits little), so values <4096 make every
+                   # .NET harness crash AFL's dry-run. 8192 clears that with headroom for
+                   # heavier harnesses; raising it is cheap (uncommitted AS != real RAM).
 SKIP_TRIAGE=false
 DRY_RUN=false
 HARNESSES=()
@@ -156,6 +163,27 @@ for i in "${!HARNESSES[@]}"; do
 done
 echo ""
 
+# Pre-flight: flag broken self-contained publishes before spending any time.
+# A self-contained harness whose runtimeconfig.json still declares a shared
+# "framework" dependency while a leftover libcoreclr.so sits in the publish dir
+# is a broken hybrid (re-instrumented framework-dependent on top of an older
+# self-contained publish) and will do 0 execs. Catch it up front so it's visible
+# in the first second instead of after a wasted 30m slot.
+PREFLIGHT_BAD=()
+for harness in "${HARNESSES[@]}"; do
+    pdir="$ROOT_DIR/publish/$harness"
+    if [ -f "$pdir/libcoreclr.so" ] && grep -q '"framework"' "$pdir/$harness.runtimeconfig.json" 2>/dev/null; then
+        PREFLIGHT_BAD+=("$harness")
+    fi
+done
+if [ ${#PREFLIGHT_BAD[@]} -gt 0 ]; then
+    echo "⚠ PRE-FLIGHT WARNING: broken hybrid publish dir (will do 0 execs):"
+    for h in "${PREFLIGHT_BAD[@]}"; do echo "    - $h"; done
+    echo "  Fix: ensure the csproj sets <SelfContained>true</SelfContained>, then re-run instrument.sh."
+    echo "  (They will also be auto-skipped ~20s into their slot by the health check.)"
+    echo ""
+fi
+
 if [ "$DRY_RUN" = true ]; then
     echo "(dry run — exiting)"
     exit 0
@@ -276,8 +304,60 @@ run_harness() {
         sleep 1
     done
 
-    # Wait for duration
-    sleep "$DURATION_SECS"
+    # Mark the start of the timed run (the health check + wait both count toward it).
+    local run_start
+    run_start=$(date +%s)
+
+    # --- Health check ---------------------------------------------------------
+    # A harness that fails to start (SharpFuzz fork-server handshake failure, OOM
+    # at init, broken self-contained publish, etc.) makes afl-fuzz hit PROGRAM
+    # ABORT within a few seconds. Without this check the runner would blindly
+    # sleep the whole duration and only reveal "0 execs" at the very end. Instead,
+    # look after a short warmup: if main has already died — or fuzzer_stats exists
+    # but shows zero execs — skip the harness now and reclaim the rest of the slot.
+    local health_wait=20
+    [ "$DURATION_SECS" -lt "$health_wait" ] && health_wait="$DURATION_SECS"
+    sleep "$health_wait"
+
+    local main_alive=0
+    kill -0 "${pids[0]}" 2>/dev/null && main_alive=1
+    local early_execs=0
+    if [ -f "$findings_dir/main/fuzzer_stats" ]; then
+        early_execs=$(grep "^execs_done" "$findings_dir/main/fuzzer_stats" 2>/dev/null | awk '{print $3}')
+    fi
+    local failed=0
+    if [ "$main_alive" -eq 0 ]; then
+        failed=1   # main aborted — definitive
+    elif [ -f "$findings_dir/main/fuzzer_stats" ] && [ "${early_execs:-0}" -eq 0 ]; then
+        failed=1   # alive but stuck at zero execs
+    fi
+    if [ "$failed" -eq 1 ]; then
+        echo "  ⚠ FAILED TO START — main $([ "$main_alive" -eq 0 ] && echo aborted || echo "alive but 0 execs") after ${health_wait}s; skipping." >&2
+        grep -m1 "PROGRAM ABORT" "$log_dir/main.log" 2>/dev/null | sed 's/^/      abort: /' >&2 || true
+        echo "      see $log_dir/main.log" >&2
+        for pid in "${pids[@]}"; do kill -9 "$pid" 2>/dev/null || true; done
+        wait 2>/dev/null || true
+        echo "0|0|0|0|FAILED"
+        return
+    fi
+
+    # --- Liveness-aware wait --------------------------------------------------
+    # Sleep out the remainder of the duration in short chunks so we can bail early
+    # if every instance dies mid-run (mass OOM, etc.) instead of waiting to the end.
+    local run_end=$((run_start + DURATION_SECS))
+    while [ "$(date +%s)" -lt "$run_end" ]; do
+        local remaining=$(( run_end - $(date +%s) ))
+        [ "$remaining" -le 0 ] && break
+        sleep $(( remaining < 15 ? remaining : 15 ))
+        local any_alive=0
+        for pid in "${pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then any_alive=1; break; fi
+        done
+        if [ "$any_alive" -eq 0 ]; then
+            echo "  ⚠ all instances exited after $(format_time $(( $(date +%s) - run_start ))) — ending harness early" >&2
+            break
+        fi
+    done
 
     # Stop all instances gracefully
     for pid in "${pids[@]}"; do
@@ -350,10 +430,15 @@ for i in "${!HARNESSES[@]}"; do
     paths=$(echo "$result" | cut -d'|' -f2)
     total_execs=$(echo "$result" | cut -d'|' -f3)
     peak_speed=$(echo "$result" | cut -d'|' -f4)
+    status=$(echo "$result" | cut -d'|' -f5)
 
     elapsed=$(( $(date +%s) - start_time ))
     execs_k=$((total_execs / 1000))
-    echo "  Done in $(format_time $elapsed): $paths paths, $crashes crashes, ${execs_k}K execs, ~${peak_speed} exec/sec"
+    if [ "$status" = "FAILED" ]; then
+        echo "  ✗ FAILED TO START in $(format_time $elapsed) — 0 execs, skipped (re-instrument $harness)"
+    else
+        echo "  Done in $(format_time $elapsed): $paths paths, $crashes crashes, ${execs_k}K execs, ~${peak_speed} exec/sec"
+    fi
 
     # Auto-triage if crashes found
     if [ "$SKIP_TRIAGE" = false ] && [ "$crashes" -gt 0 ]; then
@@ -371,7 +456,11 @@ for i in "${!HARNESSES[@]}"; do
     fi
 
     # Log to report
-    printf "%-30s  %s paths, %s, %sK execs, ~%s exec/sec  (%s)\n" "$harness" "$paths" "$crashes_info" "$execs_k" "$peak_speed" "$(format_time $elapsed)" >> "$REPORT_FILE"
+    if [ "$status" = "FAILED" ]; then
+        printf "%-30s  FAILED TO START (0 execs)  (%s)\n" "$harness" "$(format_time $elapsed)" >> "$REPORT_FILE"
+    else
+        printf "%-30s  %s paths, %s, %sK execs, ~%s exec/sec  (%s)\n" "$harness" "$paths" "$crashes_info" "$execs_k" "$peak_speed" "$(format_time $elapsed)" >> "$REPORT_FILE"
+    fi
 
     # Clean up between harnesses to prevent memory accumulation
     echo "  Cleaning up..."
