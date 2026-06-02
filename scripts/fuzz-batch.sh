@@ -333,7 +333,10 @@ run_harness() {
     fi
     if [ "$failed" -eq 1 ]; then
         echo "  ⚠ FAILED TO START — main $([ "$main_alive" -eq 0 ] && echo aborted || echo "alive but 0 execs") after ${health_wait}s; skipping." >&2
-        grep -m1 "PROGRAM ABORT" "$log_dir/main.log" 2>/dev/null | sed 's/^/      abort: /' >&2 || true
+        # Pull the abort reason from AFL's log, stripping its embedded ANSI color
+        # escapes (otherwise the unterminated color code bleeds into later output).
+        grep -m1 "PROGRAM ABORT" "$log_dir/main.log" 2>/dev/null \
+            | sed -E 's/\x1b\[[0-9;]*[mK]//g; s/^/      abort: /' >&2 || true
         echo "      see $log_dir/main.log" >&2
         for pid in "${pids[@]}"; do kill -9 "$pid" 2>/dev/null || true; done
         wait 2>/dev/null || true
