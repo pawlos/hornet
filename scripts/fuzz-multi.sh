@@ -147,22 +147,30 @@ cleanup() {
         instance=$(basename "$dir")
         [[ "$instance" == .* ]] && continue
         crashes=$(find "$dir/crashes" -maxdepth 1 -type f ! -name "README.txt" 2>/dev/null | wc -l)
-        hangs=$(find "$dir/hangs" -maxdepth 1 -type f 2>/dev/null | wc -l)
+        hangs=$(find "$dir/hangs" -maxdepth 1 -type f ! -name "README.txt" 2>/dev/null | wc -l)
         queue=$(find "$dir/queue" -maxdepth 1 -type f 2>/dev/null | wc -l)
         echo "  $instance: $queue paths, $crashes crashes, $hangs hangs"
     done
 
-    # Aggregate unique crashes across all instances
+    # Aggregate crashes and hangs across all instances (may include duplicates)
     total_crashes=0
     for dir in "$FINDINGS_DIR"/*/crashes/; do
         [ -d "$dir" ] || continue
         count=$(find "$dir" -maxdepth 1 -type f ! -name "README.txt" 2>/dev/null | wc -l)
         total_crashes=$((total_crashes + count))
     done
+    total_hangs=0
+    for dir in "$FINDINGS_DIR"/*/hangs/; do
+        [ -d "$dir" ] || continue
+        count=$(find "$dir" -maxdepth 1 -type f ! -name "README.txt" 2>/dev/null | wc -l)
+        total_hangs=$((total_hangs + count))
+    done
     echo ""
     echo "  Total crashes (may include duplicates): $total_crashes"
+    echo "  Total hangs   (may include duplicates): $total_hangs"
     echo ""
-    echo "Run ./scripts/triage.sh $HARNESS_NAME to deduplicate and classify."
+    [ "$total_crashes" -gt 0 ] && echo "Run ./scripts/triage.sh $HARNESS_NAME to deduplicate and classify crashes."
+    [ "$total_hangs" -gt 0 ] && echo "Run ./scripts/triage-hangs.sh $HARNESS_NAME to classify hangs (INFINITE/SLOW/FAST)."
 
     # Remove this harness's per-instance AFL_TMPDIR tree so a later run starts clean.
     rm -rf "$AFL_TMP_BASE" 2>/dev/null || true
@@ -237,5 +245,11 @@ while true; do
         count=$(find "$dir" -maxdepth 1 -type f ! -name "README.txt" 2>/dev/null | wc -l)
         crashes=$((crashes + count))
     done
-    echo "[$(date '+%H:%M:%S')] $alive/$CORES instances alive, $crashes total crashes"
+    hangs=0
+    for dir in "$FINDINGS_DIR"/*/hangs/; do
+        [ -d "$dir" ] || continue
+        count=$(find "$dir" -maxdepth 1 -type f ! -name "README.txt" 2>/dev/null | wc -l)
+        hangs=$((hangs + count))
+    done
+    echo "[$(date '+%H:%M:%S')] $alive/$CORES instances alive, $crashes total crashes, $hangs total hangs"
 done
