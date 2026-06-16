@@ -14,7 +14,10 @@
 #                         multi-GB of address space at startup, so values <4096 make every
 #                         .NET harness crash the dry-run. Bound runaway allocations on
 #                         memory-constrained systems like WSL2 without starving .NET.
-#   --skip-triage         Don't auto-triage after each harness
+#   --skip-triage         Don't auto-triage (crashes or hangs) after each harness
+#   --skip-hang-triage    Triage crashes but skip hang triage (which replays each
+#                         deduplicated hang standalone for up to CONFIRM_TIMEOUT and
+#                         can dominate wall-clock when a harness has many hangs)
 #   --dry-run             Show what would run without actually fuzzing
 #
 # Examples:
@@ -39,6 +42,7 @@ MEMORY_LIMIT=8192  # MB per AFL++ instance. NOTE: AFL's -m caps virtual ADDRESS 
                    # .NET harness crash AFL's dry-run. 8192 clears that with headroom for
                    # heavier harnesses; raising it is cheap (uncommitted AS != real RAM).
 SKIP_TRIAGE=false
+SKIP_HANG_TRIAGE=false
 DRY_RUN=false
 HARNESSES=()
 
@@ -49,6 +53,7 @@ while [[ $# -gt 0 ]]; do
         --cores|-c)          CORES="$2"; shift 2 ;;
         --memory-limit|-m)   MEMORY_LIMIT="$2"; shift 2 ;;
         --skip-triage)       SKIP_TRIAGE=true; shift ;;
+        --skip-hang-triage)  SKIP_HANG_TRIAGE=true; shift ;;
         --dry-run)           DRY_RUN=true; shift ;;
         --help|-h)
             sed -n '2,/^set /{ /^#/s/^# \?//p }' "$0"
@@ -153,7 +158,13 @@ echo "Harnesses:  $TOTAL"
 echo "Duration:   $DURATION each ($(format_time $TOTAL_TIME) total)"
 echo "Cores:      $CORES per harness"
 echo "Memory:     ${MEMORY_LIMIT}MB per AFL++ instance ($(( MEMORY_LIMIT * CORES ))MB max total)"
-echo "Triage:     $([ "$SKIP_TRIAGE" = true ] && echo "disabled" || echo "after each run")"
+if [ "$SKIP_TRIAGE" = true ]; then
+    echo "Triage:     disabled"
+elif [ "$SKIP_HANG_TRIAGE" = true ]; then
+    echo "Triage:     crashes only (hang triage skipped)"
+else
+    echo "Triage:     crashes + hangs after each run"
+fi
 echo ""
 echo "Schedule:"
 for i in "${!HARNESSES[@]}"; do
@@ -340,7 +351,7 @@ run_harness() {
         echo "      see $log_dir/main.log" >&2
         for pid in "${pids[@]}"; do kill -9 "$pid" 2>/dev/null || true; done
         wait 2>/dev/null || true
-        echo "0|0|0|0|FAILED"
+        echo "0|0|0|0|0|FAILED"
         return
     fi
 
@@ -389,7 +400,7 @@ run_harness() {
     wait 2>/dev/null || true
 
     # Count results
-    local crashes=0 paths=0 total_execs=0 max_speed=0
+    local crashes=0 paths=0 total_execs=0 max_speed=0 hangs=0
     for dir in "$findings_dir"/*/; do
         [ -d "$dir" ] || continue
         local instance
@@ -399,8 +410,11 @@ run_harness() {
         c=$(find "$dir/crashes" -maxdepth 1 -type f ! -name "README.txt" 2>/dev/null | wc -l)
         local q
         q=$(find "$dir/queue" -maxdepth 1 -type f 2>/dev/null | wc -l)
+        local h
+        h=$(find "$dir/hangs" -maxdepth 1 -type f ! -name "README.txt" 2>/dev/null | wc -l)
         crashes=$((crashes + c))
         paths=$((paths + q))
+        hangs=$((hangs + h))
 
         # Aggregate exec stats from fuzzer_stats
         if [ -f "$dir/fuzzer_stats" ]; then
@@ -412,7 +426,7 @@ run_harness() {
         fi
     done
 
-    echo "$crashes|$paths|$total_execs|$max_speed"
+    echo "$crashes|$paths|$total_execs|$max_speed|$hangs"
 }
 
 # Clean up before starting — kill leftovers from previous aborted runs
@@ -433,21 +447,22 @@ for i in "${!HARNESSES[@]}"; do
     paths=$(echo "$result" | cut -d'|' -f2)
     total_execs=$(echo "$result" | cut -d'|' -f3)
     peak_speed=$(echo "$result" | cut -d'|' -f4)
-    status=$(echo "$result" | cut -d'|' -f5)
+    hangs=$(echo "$result" | cut -d'|' -f5)
+    status=$(echo "$result" | cut -d'|' -f6)
 
     elapsed=$(( $(date +%s) - start_time ))
     execs_k=$((total_execs / 1000))
     if [ "$status" = "FAILED" ]; then
         echo "  ✗ FAILED TO START in $(format_time $elapsed) — 0 execs, skipped (re-instrument $harness)"
     else
-        echo "  Done in $(format_time $elapsed): $paths paths, $crashes crashes, ${execs_k}K execs, ~${peak_speed} exec/sec"
+        echo "  Done in $(format_time $elapsed): $paths paths, $crashes crashes, $hangs hangs, ${execs_k}K execs, ~${peak_speed} exec/sec"
     fi
 
     # Auto-triage if crashes found
     if [ "$SKIP_TRIAGE" = false ] && [ "$crashes" -gt 0 ]; then
-        echo "  Triaging..."
+        echo "  Triaging crashes..."
         if "$SCRIPT_DIR/triage.sh" "$harness" > /dev/null 2>&1; then
-            unique=$(find "$ROOT_DIR/findings/$harness/triage" -name "*.info" 2>/dev/null | wc -l)
+            unique=$(find "$ROOT_DIR/findings/$harness/triage" -maxdepth 1 -name "*.info" 2>/dev/null | wc -l)
             echo "  Triage: $unique unique bugs"
             crashes_info="$crashes crashes ($unique unique)"
         else
@@ -458,11 +473,28 @@ for i in "${!HARNESSES[@]}"; do
         crashes_info="$crashes crashes"
     fi
 
+    # Auto-triage hangs (classify INFINITE / SLOW / FAST). Hang triage replays each
+    # deduplicated hang standalone (up to CONFIRM_TIMEOUT each), so it must run before
+    # cleanup_processes kills the harness. INFINITE inputs are the genuine DoS candidates.
+    if [ "$SKIP_TRIAGE" = false ] && [ "$SKIP_HANG_TRIAGE" = false ] && [ "$hangs" -gt 0 ]; then
+        echo "  Triaging hangs..."
+        if "$SCRIPT_DIR/triage-hangs.sh" "$harness" > /dev/null 2>&1; then
+            infinite=$(find "$ROOT_DIR/findings/$harness/triage/hangs" -maxdepth 1 -name "*.info" 2>/dev/null | wc -l)
+            echo "  Hang triage: $infinite INFINITE (genuine non-terminating)"
+            hangs_info="$hangs hangs ($infinite infinite)"
+        else
+            echo "  Hang triage failed"
+            hangs_info="$hangs hangs"
+        fi
+    else
+        hangs_info="$hangs hangs"
+    fi
+
     # Log to report
     if [ "$status" = "FAILED" ]; then
         printf "%-30s  FAILED TO START (0 execs)  (%s)\n" "$harness" "$(format_time $elapsed)" >> "$REPORT_FILE"
     else
-        printf "%-30s  %s paths, %s, %sK execs, ~%s exec/sec  (%s)\n" "$harness" "$paths" "$crashes_info" "$execs_k" "$peak_speed" "$(format_time $elapsed)" >> "$REPORT_FILE"
+        printf "%-30s  %s paths, %s, %s, %sK execs, ~%s exec/sec  (%s)\n" "$harness" "$paths" "$crashes_info" "$hangs_info" "$execs_k" "$peak_speed" "$(format_time $elapsed)" >> "$REPORT_FILE"
     fi
 
     # Clean up between harnesses to prevent memory accumulation
