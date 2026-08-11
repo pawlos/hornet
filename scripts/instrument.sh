@@ -72,11 +72,22 @@ dotnet publish "$HARNESS_DIR" \
     -o "$PUBLISH_DIR" \
     /p:UseAppHost=true
 
-# Find the .NET shared framework directory for copying BCL DLLs
-FRAMEWORK_DIR="$(find "$DOTNET_ROOT/shared/Microsoft.NETCore.App" -maxdepth 1 -type d -name '10.*' | sort -V | tail -1)"
-# Fallback to any version if .NET 10 not found
+# Find the .NET shared framework directory for copying BCL DLLs.
+# The major version must match the harness's TargetFramework: a self-contained publish
+# lays down runtime-pack assemblies, and copying a different major version over them
+# yields a harness that fuzzes the wrong framework entirely.
+HARNESS_TFM="$(grep -ohP '(?<=<TargetFramework>)[^<]+' "$HARNESS_DIR"/*.csproj 2>/dev/null | head -1 || true)"
+FRAMEWORK_MAJOR="${HARNESS_TFM#net}"
+FRAMEWORK_MAJOR="${FRAMEWORK_MAJOR%%.*}"
+
+FRAMEWORK_DIR=""
+if [ -n "$FRAMEWORK_MAJOR" ]; then
+    FRAMEWORK_DIR="$(find "$DOTNET_ROOT/shared/Microsoft.NETCore.App" -maxdepth 1 -type d -name "$FRAMEWORK_MAJOR.*" | sort -V | tail -1)"
+fi
+# Fallback to the newest installed framework if the TFM could not be determined
 if [ -z "$FRAMEWORK_DIR" ]; then
-    FRAMEWORK_DIR="$(find "$DOTNET_ROOT/shared/Microsoft.NETCore.App" -maxdepth 1 -type d | sort -V | tail -1)"
+    FRAMEWORK_DIR="$(find "$DOTNET_ROOT/shared/Microsoft.NETCore.App" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)"
+    echo "WARNING: could not resolve TargetFramework for $HARNESS_NAME; falling back to $(basename "$FRAMEWORK_DIR")"
 fi
 
 echo ""
@@ -84,9 +95,12 @@ echo "=== Instrumenting DLLs ==="
 for dll in "${DLLS_TO_INSTRUMENT[@]}"; do
     dll_path="$PUBLISH_DIR/$dll"
 
-    # If the DLL exists in the shared framework, always copy fresh to avoid re-instrumenting a stale copy
-    if [ -n "$FRAMEWORK_DIR" ] && [ -f "$FRAMEWORK_DIR/$dll" ]; then
-        echo "Copying BCL DLL from framework: $dll"
+    # The target DLLs were deleted before publishing, so anything present now was written
+    # by dotnet publish itself (a self-contained publish lays down the runtime-pack copy) and
+    # is already the right version — leave it alone. Only a framework-dependent publish leaves
+    # a gap here, and that is filled from the shared framework.
+    if [ ! -f "$dll_path" ] && [ -n "$FRAMEWORK_DIR" ] && [ -f "$FRAMEWORK_DIR/$dll" ]; then
+        echo "Copying BCL DLL from framework $(basename "$FRAMEWORK_DIR"): $dll"
         cp "$FRAMEWORK_DIR/$dll" "$dll_path"
     fi
 
