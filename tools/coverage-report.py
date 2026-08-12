@@ -353,6 +353,98 @@ if (tabs.length) render(0);
 """
 
 
+def render_index(rows, generated):
+    """Portfolio index over a sweep. rows: dicts with harness, library, status,
+    pct, hit, inst, files, panels, inputs, total, secs."""
+    def esc(s):
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # A percentage over a handful of lines is not comparable to one over thousands:
+    # a harness whose target assembly yielded no symbols may show a tiny measured
+    # surface at a flattering percentage. Rank those separately rather than at the top.
+    MIN_SURFACE = 200
+
+    failed = [r for r in rows if r["status"] != "ok"]
+    ok = [r for r in rows if r["status"] == "ok"]
+    thin = [r for r in ok if r["inst"] < MIN_SURFACE]
+    ranked = [r for r in ok if r["inst"] >= MIN_SURFACE]
+    covered = sum(r["hit"] for r in ranked)
+    instrumented = sum(r["inst"] for r in ranked)
+    with_source = sum(1 for r in ok if r["panels"] > 0)
+
+    body = []
+    for r in sorted(ranked, key=lambda r: -r["pct"]) + sorted(
+            thin + failed, key=lambda r: (r["status"] != "ok", -r["inst"])):
+        link = f'findings/{r["harness"]}/triage/coverage-report.html'
+        if r["status"] != "ok":
+            pct, bar, tier = "—", "", esc(r["status"])
+        elif r["inst"] < MIN_SURFACE:
+            pct = f'{r["pct"]}%'
+            bar = ""
+            tier = "too little measured"
+        else:
+            pct = f'{r["pct"]}%'
+            bar = (f'<span class="bar"><span class="bar-fill" '
+                   f'style="width:{min(r["pct"], 100)}%"></span></span>')
+            tier = "source" if r["panels"] > 0 else "metrics only"
+        body.append(
+            f'<tr><td class="fname"><a href="../../{esc(link)}">{esc(r["harness"])}</a></td>'
+            f'<td class="fname" style="color:var(--ink-3)">{esc(r["library"])}</td>'
+            f'<td class="num strong">{pct}</td><td class="barcell">{bar}</td>'
+            f'<td class="num">{r["hit"]}/{r["inst"]}</td>'
+            f'<td class="num">{r["files"]}</td>'
+            f'<td class="num">{r["inputs"]}</td>'
+            f'<td class="num" style="color:var(--ink-3)">{tier}</td></tr>')
+
+    fail_note = ""
+    if thin:
+        fail_note += (f'<div class="notes"><span>{len(thin)} harness(es) measured fewer than '
+                      f'{MIN_SURFACE} instrumented lines and are listed below the ranking rather '
+                      f'than inside it. That almost always means the target assembly yielded no '
+                      f'symbols, so what little was measured is incidental — a high percentage '
+                      f'there reflects a tiny denominator, not good coverage.</span></div>')
+    if failed:
+        names = ", ".join(esc(r["harness"]) for r in failed)
+        fail_note = (f'<div class="notes"><span>{len(failed)} harness(es) did not complete: '
+                     f'{names}. A status of <span class="mono">fail:124</span> is the per-harness '
+                     f'timeout — usually the harness aborting the process on some inputs, which is '
+                     f'worth investigating on its own.</span></div>')
+
+    return f"""<title>Harness coverage index</title>
+<style>{CSS}
+td a {{ color:var(--accent); text-decoration:none; }}
+td a:hover {{ text-decoration:underline; }}
+</style>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">AFL++ · SharpFuzz · portfolio sweep</p>
+    <h1>Harness coverage index</h1>
+    <p class="lede">Source-level coverage across every harness, ranked. Each row links to that
+    harness's full report. Percentages are over instrumented lines in files with at least one
+    covered line. Generated {esc(generated)}.</p>
+  </header>
+  <section><h2>Totals</h2><div class="tiles">
+    <div class="tile"><span class="tile-v">{len(rows)}</span><span class="tile-l">harnesses</span></div>
+    <div class="tile"><span class="tile-v">{len(ok)}</span><span class="tile-l">completed</span></div>
+    <div class="tile"><span class="tile-v">{with_source}</span><span class="tile-l">with source</span></div>
+    <div class="tile"><span class="tile-v">{covered:,}</span><span class="tile-l">lines covered</span></div>
+    <div class="tile"><span class="tile-v">{round(100 * covered / instrumented, 1) if instrumented else 0}%</span><span class="tile-l">overall</span></div>
+  </div></section>
+  {fail_note}
+  <section><h2>By coverage</h2><div class="panel tablewrap"><table>
+    <thead><tr><th>Harness</th><th>Library</th><th style="text-align:right">Coverage</th><th></th>
+    <th style="text-align:right">Lines</th><th style="text-align:right">Files</th>
+    <th style="text-align:right">Inputs</th><th style="text-align:right">Detail</th></tr></thead>
+    <tbody>{"".join(body)}</tbody>
+  </table></div></section>
+  <footer>Percentages are over every instrumented line of the target library, including files
+  with no coverage at all. A low figure is not automatically a weak harness: the denominator is
+  the whole assembly, much of which a focused harness never intends to reach. Compare a harness
+  against its own history rather than against its neighbours.</footer>
+</div>
+"""
+
+
 def self_test():
     failures = []
 
@@ -431,9 +523,33 @@ def main():
     ap.add_argument("--fuzzer-stats", default="")
     ap.add_argument("--max-files", type=int, default=6)
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--index-from", default="",
+                    help="render a portfolio index from a sweep TSV instead of a single report")
+    ap.add_argument("--generated", default="")
     a = ap.parse_args()
     if a.self_test:
         return self_test()
+
+    if a.index_from:
+        if not a.output:
+            ap.error("--output is required with --index-from")
+        rows = []
+        for line in open(a.index_from, encoding="utf-8"):
+            p = line.rstrip("\n").split("\t")
+            if len(p) < 11:
+                continue
+            rows.append({"harness": p[0], "status": p[1], "library": p[2],
+                         "hit": int(p[3]), "inst": int(p[4]), "pct": float(p[5]),
+                         "files": int(p[6]), "panels": int(p[7]),
+                         "inputs": int(p[8]), "total": int(p[9]), "secs": int(p[10])})
+        if not rows:
+            print(f"ERROR: no usable rows in {a.index_from}")
+            return 1
+        os.makedirs(os.path.dirname(os.path.abspath(a.output)), exist_ok=True)
+        open(a.output, "w", encoding="utf-8").write(render_index(rows, a.generated))
+        print(f"wrote {a.output} ({len(rows)} harnesses)")
+        return 0
+
     if not a.cobertura or not a.output:
         ap.error("--cobertura and --output are required")
     cov = parse_cobertura(a.cobertura)
@@ -480,6 +596,15 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(a.output)), exist_ok=True)
     open(a.output, "w", encoding="utf-8").write(html)
     print(f"wrote {a.output} ({len(rows)} files, {len(panels)} source panels)")
+
+    # Machine-readable tail for scripts/coverage-sweep.sh. Deliberately measured over
+    # EVERY instrumented line of the target library, including files with no coverage
+    # at all — a percentage that silently drops uncovered files ranks a harness where
+    # nothing was measured above one that genuinely covers half a large assembly.
+    hit = sum(sum(1 for v in l.values() if v > 0) for l in lib_files.values())
+    inst = sum(len(l) for l in lib_files.values())
+    print(f"SUMMARY\t{a.harness}\t{a.library}\t{hit}\t{inst}\t"
+          f"{round(100 * hit / inst, 1) if inst else 0}\t{len(rows)}\t{len(panels)}")
     return 0
 
 
