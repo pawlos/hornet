@@ -56,6 +56,13 @@ dotnet tool install --global SharpFuzz.CommandLine 2>/dev/null \
     || dotnet tool update --global SharpFuzz.CommandLine
 
 echo ""
+echo "=== Installing coverage tools ==="
+for pkg in dotnet-coverage dotnet-symbol; do
+    dotnet tool install --global "$pkg" 2>/dev/null \
+        || dotnet tool update --global "$pkg"
+done
+
+echo ""
 echo "=== Restoring NuGet packages ==="
 dotnet restore "$ROOT_DIR/dotnet-fuzzing.sln"
 
@@ -63,6 +70,8 @@ echo ""
 echo "=== Verifying tools ==="
 echo -n "dotnet: "; dotnet --version
 echo -n "sharpfuzz: "; sharpfuzz --version 2>&1 || echo "(installed)"
+echo -n "dotnet-coverage: "; dotnet-coverage --version 2>&1 | head -1 || echo "NOT FOUND"
+echo -n "dotnet-symbol: "; dotnet-symbol --help >/dev/null 2>&1 && echo "ok" || echo "NOT FOUND"
 echo -n "afl-fuzz: "; afl-fuzz --version 2>&1 | head -1 || echo "NOT FOUND - install AFL++"
 
 echo ""
