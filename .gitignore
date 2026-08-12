@@ -4,6 +4,7 @@
 
 # Fuzzing artifacts
 publish/
+publish-cov/
 findings/
 external/
 
@@ -11,6 +12,7 @@ external/
 .claude/
 repro/
 reported/
+specs/
 minimized.config
 
 # IDE

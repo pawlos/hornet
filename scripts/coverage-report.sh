@@ -73,3 +73,66 @@ ensure_tool() {
 }
 ensure_tool dotnet-coverage dotnet-coverage
 ensure_tool dotnet-symbol   dotnet-symbol
+
+# --- pristine publish ---------------------------------------------------------
+# Deliberately NOT instrumented: SharpFuzz's rewritten IL would be attributed as
+# target coverage, and publish/<Harness> may be in use by a running campaign.
+if [ "$REGEN" -eq 0 ]; then
+    echo ""
+    echo "=== Publishing (pristine) ==="
+    dotnet publish "$ROOT_DIR/src/$HARNESS" -c Release -o "$PUBLISH_DIR" -v quiet --nologo
+fi
+
+APPHOST="$PUBLISH_DIR/$HARNESS"
+if [ ! -x "$APPHOST" ]; then
+    echo "ERROR: no app host at $APPHOST"
+    exit 1
+fi
+
+# --- input selection ----------------------------------------------------------
+INPUT_LIST="$(mktemp)"
+trap 'rm -f "$INPUT_LIST" "${REPLAY_SH:-}"' EXIT
+
+SEEDS=()
+[ -d "$ROOT_DIR/$CORPUS_DIR" ] && while IFS= read -r f; do SEEDS+=("$f"); done \
+    < <(find "$ROOT_DIR/$CORPUS_DIR" -maxdepth 1 -type f | sort)
+
+QUEUE=()
+QDIR="$ROOT_DIR/findings/$HARNESS/default/queue"
+[ -d "$QDIR" ] && while IFS= read -r f; do QUEUE+=("$f"); done \
+    < <(find "$QDIR" -maxdepth 1 -type f ! -name '.*' ! -name 'README*' | sort)
+
+INPUT_TOTAL=$(( ${#SEEDS[@]} + ${#QUEUE[@]} ))
+if [ "$INPUT_TOTAL" -eq 0 ]; then
+    echo "ERROR: no inputs — neither $CORPUS_DIR nor a queue at findings/$HARNESS/default/queue"
+    exit 1
+fi
+
+# Seeds are always replayed in full; only the queue is sampled.
+: > "$INPUT_LIST"
+[ ${#SEEDS[@]} -gt 0 ] && printf '%s\n' "${SEEDS[@]}" >> "$INPUT_LIST"
+
+QUEUE_BUDGET=$(( MAX_INPUTS - ${#SEEDS[@]} ))
+if [ ${#QUEUE[@]} -gt 0 ]; then
+    if [ "$ALL_INPUTS" -eq 1 ] || [ "${#QUEUE[@]}" -le "$QUEUE_BUDGET" ]; then
+        printf '%s\n' "${QUEUE[@]}" >> "$INPUT_LIST"
+    else
+        # Even stride across the queue, so the sample spans early and late discoveries.
+        [ "$QUEUE_BUDGET" -lt 1 ] && QUEUE_BUDGET=1
+        # awk reads a file rather than a pipe: its early exit() would SIGPIPE the
+        # writing end, and pipefail would turn that into a fatal script error.
+        QUEUE_FILE="$(mktemp)"
+        printf '%s\n' "${QUEUE[@]}" > "$QUEUE_FILE"
+        awk -v want="$QUEUE_BUDGET" -v have="${#QUEUE[@]}" \
+            'BEGIN{step=have/want} NR>=int(n*step)+1 {print; n++} n>=want{exit}' \
+            "$QUEUE_FILE" >> "$INPUT_LIST"
+        rm -f "$QUEUE_FILE"
+    fi
+fi
+
+sed -i '/^$/d' "$INPUT_LIST"
+INPUT_USED=$(wc -l < "$INPUT_LIST")
+echo "  inputs  : $INPUT_USED of $INPUT_TOTAL (${#SEEDS[@]} seed, ${#QUEUE[@]} queue)"
+if [ "$INPUT_USED" -lt "$INPUT_TOTAL" ]; then
+    echo "  NOTE: queue sampled — pass --all-inputs to replay everything"
+fi
