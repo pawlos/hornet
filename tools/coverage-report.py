@@ -80,7 +80,12 @@ def resolve_source(build_path, root_dir, source_root="", runtime_tag=""):
     /_/src/runtime/src/libraries/.../Foo.cs to the file's lines, or None."""
     if build_path in _SOURCE_CACHE:
         return _SOURCE_CACHE[build_path]
-    rel = build_path.lstrip("/")
+    # Build paths come in three shapes: SourceLink-normalized (/_/src/...), Windows
+    # absolute (C:\src\Foo\Bar.cs, from PDBs built without path mapping), and Unix
+    # absolute. Normalize separators, then match by path suffix against each clone.
+    rel = build_path.replace("\\", "/")
+    rel = rel.split(":", 1)[1] if len(rel) > 1 and rel[1] == ":" else rel
+    rel = rel.lstrip("/")
     if rel.startswith("_/"):
         rel = rel[2:]
 
@@ -89,12 +94,20 @@ def resolve_source(build_path, root_dir, source_root="", runtime_tag=""):
         cands.append(os.path.join(source_root, rel))
     # dotnet/runtime paths carry a leading src/runtime/ that the clone does not have.
     runtime_rel = rel[len("src/runtime/"):] if rel.startswith("src/runtime/") else None
+    parts = rel.split("/")
     ext = os.path.join(root_dir, "external")
     if os.path.isdir(ext):
-        for clone in sorted(os.listdir(ext)):
+        # Try the clone whose name appears in the path first, so a suffix like
+        # "src/Parser.cs" cannot be claimed by an unrelated clone.
+        clones = sorted(os.listdir(ext),
+                        key=lambda c: (c.lower() not in rel.lower(), c.lower()))
+        for clone in clones:
             cands.append(os.path.join(ext, clone, rel))
             if runtime_rel:
                 cands.append(os.path.join(ext, clone, runtime_rel))
+            # Progressively shorter suffixes, never fewer than two components.
+            for i in range(1, max(1, len(parts) - 1)):
+                cands.append(os.path.join(ext, clone, *parts[i:]))
 
     for c in cands:
         if os.path.isfile(c):
@@ -436,7 +449,7 @@ def main():
         if hit == 0:
             zero_cov += 1
             continue
-        rows.append({"path": path, "name": path.split("/")[-1],
+        rows.append({"path": path, "name": path.replace("\\", "/").split("/")[-1],
                      "hit": hit, "inst": inst, "pct": round(100 * hit / inst, 1),
                      "missing": inst - hit})
     rows.sort(key=lambda r: -r["missing"])

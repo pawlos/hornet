@@ -80,7 +80,11 @@ ensure_tool dotnet-symbol   dotnet-symbol
 if [ "$REGEN" -eq 0 ]; then
     echo ""
     echo "=== Publishing (pristine) ==="
-    dotnet publish "$ROOT_DIR/src/$HARNESS" -c Release -o "$PUBLISH_DIR" -v quiet --nologo
+    # CopyDebugSymbolFilesFromPackages brings a package's own .pdb along; without it
+    # publish drops them and libraries that ship symbols (MimeKit, for one) would be
+    # reported as having none.
+    dotnet publish "$ROOT_DIR/src/$HARNESS" -c Release -o "$PUBLISH_DIR" -v quiet --nologo \
+        /p:CopyDebugSymbolFilesFromPackages=true
 fi
 
 APPHOST="$PUBLISH_DIR/$HARNESS"
