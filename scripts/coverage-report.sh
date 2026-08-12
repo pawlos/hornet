@@ -136,3 +136,87 @@ echo "  inputs  : $INPUT_USED of $INPUT_TOTAL (${#SEEDS[@]} seed, ${#QUEUE[@]} q
 if [ "$INPUT_USED" -lt "$INPUT_TOTAL" ]; then
     echo "  NOTE: queue sampled — pass --all-inputs to replay everything"
 fi
+
+# --- symbol acquisition -------------------------------------------------------
+# Without a PDB, dotnet-coverage cannot instrument a module at all: the assembly
+# is absent from the output rather than reported as 0%.
+MISSING_SYMBOLS=""
+if [ "$REGEN" -eq 0 ]; then
+    echo ""
+    echo "=== Symbols ==="
+    for dll in $TARGET_DLLS; do
+        dll_path="$PUBLISH_DIR/$dll"
+        pdb_path="${dll_path%.dll}.pdb"
+
+        if [ ! -f "$dll_path" ]; then
+            echo "  $dll: NOT IN PUBLISH DIR — stale HARNESSES.md row?"
+            MISSING_SYMBOLS="$MISSING_SYMBOLS $dll"
+            continue
+        fi
+        if [ -f "$pdb_path" ]; then
+            echo "  $dll: pdb already present"
+            continue
+        fi
+        if strings "$dll_path" | grep -q "EmbeddedPortablePdb"; then
+            echo "  $dll: embedded pdb"
+            continue
+        fi
+
+        if dotnet-symbol --symbols --output "$PUBLISH_DIR" "$dll_path" >/dev/null 2>&1 \
+           && [ -f "$pdb_path" ]; then
+            echo "  $dll: pdb from microsoft symbol server"
+            continue
+        fi
+        if dotnet-symbol --symbols --output "$PUBLISH_DIR" \
+               --server-path https://symbols.nuget.org/download/symbols/ \
+               "$dll_path" >/dev/null 2>&1 && [ -f "$pdb_path" ]; then
+            echo "  $dll: pdb from nuget symbol server"
+            continue
+        fi
+
+        echo "  $dll: NO SYMBOLS — assembly will be absent from the report"
+        MISSING_SYMBOLS="$MISSING_SYMBOLS $dll"
+    done
+fi
+
+# --- replay under dotnet-coverage ---------------------------------------------
+mkdir -p "$OUT_DIR"
+if [ "$REGEN" -eq 0 ]; then
+    REPLAY_SH="$(mktemp)"
+    cat > "$REPLAY_SH" <<EOF
+#!/usr/bin/env bash
+# env -u __AFL_SHM_ID is required: with it set, the harness tries to speak AFL's
+# fork-server protocol instead of reading one input from stdin.
+while IFS= read -r f; do
+    env -u __AFL_SHM_ID "$APPHOST" "$APPHOST.dll" < "\$f" >/dev/null 2>&1 || true
+done < "$INPUT_LIST"
+EOF
+    chmod +x "$REPLAY_SH"
+
+    echo ""
+    echo "=== Replaying $INPUT_USED inputs under dotnet-coverage ==="
+    dotnet-coverage collect \
+        --output "$COBERTURA" --output-format cobertura \
+        -- "$REPLAY_SH"
+fi
+
+if [ ! -s "$COBERTURA" ]; then
+    echo "ERROR: no coverage produced at $COBERTURA"
+    exit 1
+fi
+
+# A total absence of coverage means a broken pipeline (missing symbols, R2R not
+# disabled, wrong publish), not a harness that covers nothing. Never report it
+# as a result.
+COVERED=$(python3 - "$COBERTURA" <<'PY'
+import sys, xml.etree.ElementTree as ET
+t = ET.parse(sys.argv[1])
+print(sum(1 for c in t.getroot().iter('line') if int(c.get('hits', '0')) > 0))
+PY
+)
+echo "  covered line records: $COVERED"
+if [ "$COVERED" -eq 0 ]; then
+    echo "ERROR: zero coverage across all targets — the pipeline is broken, not the harness."
+    echo "  check: DOTNET_ReadyToRun=0 exported, PDBs present, publish-cov not instrumented"
+    exit 1
+fi
