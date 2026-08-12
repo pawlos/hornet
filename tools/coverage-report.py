@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render a source-level coverage report from a cobertura file produced by
 scripts/coverage-report.sh. Stdlib only."""
-import argparse, os, sys, xml.etree.ElementTree as ET
+import argparse, json, os, sys, urllib.request, xml.etree.ElementTree as ET
 
 
 def parse_cobertura(path):
@@ -43,6 +43,75 @@ def read_fuzzer_stats(path):
     return out
 
 
+# external/ clones drift from the packaged version. Annotated source rendered
+# against drifted source highlights the wrong lines while looking entirely
+# normal, which is worse than showing no source at all.
+NON_STATEMENT_LIMIT = 0.10
+
+
+def check_alignment(src_lines, lines):
+    if not lines:
+        return False, "no instrumented lines"
+    hi = max(lines)
+    if hi > len(src_lines):
+        return False, f"coverage line {hi} is beyond end of file ({len(src_lines)} lines)"
+    bad = 0
+    for n in lines:
+        t = src_lines[n - 1].strip()
+        if t == "" or t.startswith("//") or t in ("{", "}", "};", "});"):
+            bad += 1
+    frac = bad / len(lines)
+    if frac > NON_STATEMENT_LIMIT:
+        return False, f"{100 * frac:.0f}% of instrumented lines are blank, comment or brace"
+    return True, ""
+
+
+_SOURCE_CACHE = {}
+
+
+def resolve_source(build_path, root_dir, source_root="", runtime_tag=""):
+    """Resolve a SourceLink build path such as
+    /_/src/runtime/src/libraries/.../Foo.cs to the file's lines, or None."""
+    if build_path in _SOURCE_CACHE:
+        return _SOURCE_CACHE[build_path]
+    rel = build_path.lstrip("/")
+    if rel.startswith("_/"):
+        rel = rel[2:]
+
+    cands = []
+    if source_root:
+        cands.append(os.path.join(source_root, rel))
+    # dotnet/runtime paths carry a leading src/runtime/ that the clone does not have.
+    runtime_rel = rel[len("src/runtime/"):] if rel.startswith("src/runtime/") else None
+    ext = os.path.join(root_dir, "external")
+    if os.path.isdir(ext):
+        for clone in sorted(os.listdir(ext)):
+            cands.append(os.path.join(ext, clone, rel))
+            if runtime_rel:
+                cands.append(os.path.join(ext, clone, runtime_rel))
+
+    for c in cands:
+        if os.path.isfile(c):
+            _SOURCE_CACHE[build_path] = open(c, encoding="utf-8", errors="replace").read().split("\n")
+            return _SOURCE_CACHE[build_path]
+
+    # GitHub at a tag, dotnet/runtime only — the commit SHA embedded in assembly
+    # version strings is an internal build commit that does not resolve publicly.
+    if runtime_rel and runtime_tag:
+        url = f"https://raw.githubusercontent.com/dotnet/runtime/{runtime_tag}/{runtime_rel}"
+        try:
+            with urllib.request.urlopen(url, timeout=20) as r:
+                if r.status == 200:
+                    txt = r.read().decode("utf-8", "replace").split("\n")
+                    _SOURCE_CACHE[build_path] = txt
+                    return txt
+        except Exception:
+            pass
+
+    _SOURCE_CACHE[build_path] = None
+    return None
+
+
 def self_test():
     failures = []
 
@@ -74,6 +143,25 @@ def self_test():
     check("parse: keeps max hits", got["/_/src/Foo.cs"][2] == 7)
     check("stats: hit/instrumented", file_stats(got["/_/src/Foo.cs"]) == (2, 3),
           file_stats(got["/_/src/Foo.cs"]))
+
+    # Alignment: a coverage line beyond EOF means the source is a different version.
+    src = ["int a = 1;", "int b = 2;", "int c = 3;"]
+    ok, why = check_alignment(src, {1: 1, 2: 0, 3: 1})
+    check("align: accepts matching source", ok, why)
+
+    ok, why = check_alignment(src, {1: 1, 99: 1})
+    check("align: rejects out-of-bounds line", not ok and "beyond" in why, why)
+
+    # Plausibility: instrumented lines are statements. A file whose "instrumented"
+    # lines are mostly blanks, comments or braces is misaligned.
+    drifted = ["", "// comment", "{", "}", "int real = 1;"]
+    ok, why = check_alignment(drifted, {1: 1, 2: 1, 3: 1, 4: 1, 5: 1})
+    check("align: rejects implausible lines", not ok and "%" in why, why)
+
+    # 1 non-statement out of 12 is 8.3%, under the 10% threshold.
+    fine = ["int x = %d;" % i for i in range(11)] + ["}"]
+    ok, why = check_alignment(fine, {i: 1 for i in range(1, 13)})
+    check("align: tolerates a few braces", ok, why)
 
     p = "/tmp/_covstats.txt"
     open(p, "w").write("execs_done        : 12345\nunrelated : 7\ncorpus_count      : 42\n")
