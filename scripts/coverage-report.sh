@@ -220,3 +220,36 @@ if [ "$COVERED" -eq 0 ]; then
     echo "  check: DOTNET_ReadyToRun=0 exported, PDBs present, publish-cov not instrumented"
     exit 1
 fi
+
+# --- render -------------------------------------------------------------------
+# The packaged version is what was actually compiled into the assembly, so prefer
+# it over whatever runtime happens to be installed. HARNESSES.md records "(BCL/SDK)"
+# for shared-framework targets, which carry no package version of their own.
+RUNTIME_TAG=""
+if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    RUNTIME_TAG="v$VERSION"
+else
+    TFM="$(grep -oP '(?<=<TargetFramework>)[^<]+' "$ROOT_DIR/src/$HARNESS"/*.csproj | head -1 || true)"
+    MAJOR="${TFM#net}"; MAJOR="${MAJOR%%.*}"
+    if [ -n "$MAJOR" ]; then
+        RT="$(dotnet --list-runtimes | awk -v m="$MAJOR" '$1=="Microsoft.NETCore.App" && $2 ~ "^"m"\\." {v=$2} END{print v}')"
+        [ -n "$RT" ] && RUNTIME_TAG="v$RT"
+    fi
+fi
+
+echo ""
+echo "=== Rendering ==="
+python3 "$ROOT_DIR/tools/coverage-report.py" \
+    --cobertura "$COBERTURA" \
+    --harness "$HARNESS" \
+    --library "$LIBRARY" \
+    --output "$OUT_DIR/coverage-report.html" \
+    --inputs-used "$INPUT_USED" \
+    --inputs-total "$INPUT_TOTAL" \
+    --missing-symbols "$MISSING_SYMBOLS" \
+    --runtime-tag "$RUNTIME_TAG" \
+    --fuzzer-stats "$ROOT_DIR/findings/$HARNESS/default/fuzzer_stats"
+
+echo ""
+echo "=== Done ==="
+echo "  $OUT_DIR/coverage-report.html"
