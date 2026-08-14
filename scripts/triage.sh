@@ -78,7 +78,12 @@ triage_harness() {
 
         # Extract exception type
         local exception_type
-        if echo "$output" | grep -q "Out of memory"; then
+        if echo "$output" | grep -q "OracleViolation"; then
+            # An oracle finding is a violated invariant, not a crash. Checked first because
+            # the type name does not end in "Exception", so the generic extraction below
+            # would otherwise latch onto an exception named inside the violation message.
+            exception_type="OracleViolation"
+        elif echo "$output" | grep -q "Out of memory"; then
             exception_type="OutOfMemoryException"
         else
             exception_type=$(echo "$output" | grep -o '[A-Za-z.]*Exception' | head -1)
