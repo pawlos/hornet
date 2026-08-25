@@ -9,7 +9,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 export DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}"
 export PATH="$PATH:$DOTNET_ROOT:$DOTNET_ROOT/tools"
-export DOTNET_ROLL_FORWARD=Major
 
 HARNESS_NAME="${1:?Usage: instrument.sh <harness-name> [dll1 dll2 ...]}"
 shift
