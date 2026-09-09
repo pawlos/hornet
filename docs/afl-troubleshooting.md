@@ -34,6 +34,35 @@ export DOTNET_GCHeapHardLimit=0x20000000
 ./scripts/fuzz-afl.sh Harness.MyTarget corpora/mytarget
 ```
 
+### Every seed "results in a crash" on .NET 11 RC 1 or later
+
+```
+[!] WARNING: Test case 'id:000000,...' results in a crash, skipping
+[+] All test cases processed.
+[-] PROGRAM ABORT : We need at least one valid input seed that does not crash!
+```
+
+The fork server comes up, but every execution dies before the harness body runs. Adding logging to the fuzz lambda shows nothing, because the lambda is never reached.
+
+This happens when an app-host-launched harness runs on .NET 11 RC 1 or later. SharpFuzz's out-of-process fork server relaunches the harness for each execution as `dotnet $(Environment.CommandLine)`. Through .NET 11 Preview 7 the host rewrote argv[0] to the managed assembly path, so the muxer received `dotnet /path/Harness.dll` and it worked. RC 1 changed argv[0] to report the host invocation name instead ([dotnet/runtime#131671](https://github.com/dotnet/runtime/pull/131671)), so the muxer now receives `dotnet /path/Harness` — no `.dll` — and reads it as a `dotnet-Harness` tool command.
+
+`AFL_DEBUG=1` surfaces the muxer's own message, which is the only visible symptom:
+
+```
+Could not execute because the specified command or file was not found.
+  * You intended to execute a .NET program, but dotnet-/path/publish/Harness/Harness does not exist.
+```
+
+**Fix:** launch through the muxer with the managed assembly as the app path, even for a self-contained publish. `fuzz-afl.sh` does this for every harness:
+
+```bash
+afl-fuzz ... -- "$DOTNET_ROOT/dotnet" /abs/path/publish/Harness/Harness.dll
+```
+
+A self-contained publish still runs self-contained this way — its `runtimeconfig.json` carries `includedFrameworks`, so `hostfxr` loads the app-local runtime and the app-local instrumented assemblies rather than the shared framework. Verified by coverage: the instrumented BCL copy is still the one that reports edges.
+
+Draft reports for SharpFuzz and dotnet/runtime are in `reported/SharpFuzz-Net11-AppHost-Argv0/`.
+
 ### "Fork server handshake failed"
 
 ```

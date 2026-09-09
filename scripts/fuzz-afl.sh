@@ -70,15 +70,25 @@ export AFL_NO_UI="${AFL_NO_UI:-0}"
 export DOTNET_TieredCompilation=0
 export DOTNET_ReadyToRun=0
 
-# Detect self-contained vs framework-dependent publish.
-# Self-contained bundles the runtime (libcoreclr.so) alongside the app.
+# Both publish shapes are launched through the muxer, with the harness assembly as the
+# app path. A self-contained publish still runs self-contained that way — its
+# runtimeconfig.json carries "includedFrameworks", so hostfxr loads the app-local runtime
+# and the app-local instrumented BCL copies rather than the shared framework.
+#
+# The native app host cannot be used. SharpFuzz's out-of-process fork server re-launches
+# itself for each execution as `dotnet $(Environment.CommandLine)`, so argv[0] has to be
+# something the muxer accepts as an app path. Up to .NET 11 Preview 7 the host rewrote
+# argv[0] to the managed assembly path, which it does; .NET 11 RC 1 changed argv[0] to
+# report the host invocation name instead (dotnet/runtime#131671), so an app-host-launched
+# harness makes SharpFuzz spawn `dotnet /path/to/Harness.Name`, which the muxer reads as a
+# `dotnet-Harness.Name` tool command and fails to find. Every execution then looks to AFL
+# like a crash, and the dry run aborts with "We need at least one valid input seed".
 if [ -f "$ROOT_DIR/publish/$HARNESS_NAME/libcoreclr.so" ]; then
-    TARGET_CMD=("$HARNESS_EXE" "$HARNESS_DLL")
     echo "=== Starting AFL++ (self-contained) ==="
 else
-    TARGET_CMD=("$DOTNET" "$HARNESS_DLL")
     echo "=== Starting AFL++ (framework-dependent) ==="
 fi
+TARGET_CMD=("$DOTNET" "$HARNESS_DLL")
 
 # Auto-detect dictionary: look for dictionaries/<harness-name>.dict or common aliases
 DICT_ARGS=()
