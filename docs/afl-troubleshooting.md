@@ -61,8 +61,6 @@ afl-fuzz ... -- "$DOTNET_ROOT/dotnet" /abs/path/publish/Harness/Harness.dll
 
 A self-contained publish still runs self-contained this way — its `runtimeconfig.json` carries `includedFrameworks`, so `hostfxr` loads the app-local runtime and the app-local instrumented assemblies rather than the shared framework. Verified by coverage: the instrumented BCL copy is still the one that reports edges.
 
-Draft reports for SharpFuzz and dotnet/runtime are in `reported/SharpFuzz-Net11-AppHost-Argv0/`.
-
 ### "Fork server handshake failed"
 
 ```
