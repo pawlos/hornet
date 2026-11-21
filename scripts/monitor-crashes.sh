@@ -15,6 +15,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 export DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}"
 DOTNET="$DOTNET_ROOT/dotnet"
+# shellcheck source=lib/afl-target.sh
+source "$SCRIPT_DIR/lib/afl-target.sh"
 
 # Parse arguments
 WATCH_MODE=0
@@ -152,13 +154,9 @@ run_scan() {
             continue
         fi
 
-        # Determine how to run the harness
-        local target_cmd
-        if [ -f "$publish_dir/libcoreclr.so" ]; then
-            target_cmd=("$publish_dir/$harness_name" "$harness_dll")
-        else
-            target_cmd=("$DOTNET" "$harness_dll")
-        fi
+        # Launch as fuzz-afl.sh does (muxer for both publish shapes; see lib/afl-target.sh).
+        afl_resolve_target "$harness_name"
+        local target_cmd=("${TARGET_CMD[@]}")
 
         # Replay and classify each crash
         declare -A seen_signatures

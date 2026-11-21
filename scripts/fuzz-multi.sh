@@ -9,6 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 export DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}"
 DOTNET="$DOTNET_ROOT/dotnet"
+# shellcheck source=lib/afl-target.sh
+source "$SCRIPT_DIR/lib/afl-target.sh"
 
 # Parse arguments
 HARNESS_NAME=""
@@ -52,7 +54,6 @@ if [ "$CORES" -eq 0 ]; then
 fi
 
 HARNESS_DLL="$ROOT_DIR/publish/$HARNESS_NAME/$HARNESS_NAME.dll"
-HARNESS_EXE="$ROOT_DIR/publish/$HARNESS_NAME/$HARNESS_NAME"
 FINDINGS_DIR="$ROOT_DIR/findings/$HARNESS_NAME"
 
 # Resolve corpus dir relative to ROOT_DIR if not absolute
@@ -86,14 +87,10 @@ export AFL_NO_UI=1  # Must use no-UI for parallel (only one can own the terminal
 export DOTNET_TieredCompilation=0
 export DOTNET_ReadyToRun=0
 
-# Detect self-contained vs framework-dependent
-if [ -f "$ROOT_DIR/publish/$HARNESS_NAME/libcoreclr.so" ]; then
-    TARGET_CMD=("$HARNESS_EXE" "$HARNESS_DLL")
-    MODE="self-contained"
-else
-    TARGET_CMD=("$DOTNET" "$HARNESS_DLL")
-    MODE="framework-dependent"
-fi
+# Muxer launch for both publish shapes; the app host breaks the SharpFuzz fork server
+# on .NET 11 RC 1+ (see lib/afl-target.sh).
+afl_resolve_target "$HARNESS_NAME"
+MODE="$HARNESS_KIND"
 
 # Auto-detect dictionary
 DICT_ARGS=()

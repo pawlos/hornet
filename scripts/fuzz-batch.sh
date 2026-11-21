@@ -32,6 +32,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 export DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}"
 DOTNET="$DOTNET_ROOT/dotnet"
+# shellcheck source=lib/afl-target.sh
+source "$SCRIPT_DIR/lib/afl-target.sh"
 
 # Defaults
 DURATION="2h"
@@ -268,18 +270,14 @@ run_harness() {
     local corpus_dir="$ROOT_DIR/corpora/$(find_corpus "$harness")"
     local findings_dir="$ROOT_DIR/findings/$harness"
     local harness_dll="$ROOT_DIR/publish/$harness/$harness.dll"
-    local harness_exe="$ROOT_DIR/publish/$harness/$harness"
     local log_dir="$findings_dir/.logs"
 
     mkdir -p "$findings_dir" "$log_dir"
 
-    # Detect self-contained vs framework-dependent
-    local target_cmd
-    if [ -f "$ROOT_DIR/publish/$harness/libcoreclr.so" ]; then
-        target_cmd=("$harness_exe" "$harness_dll")
-    else
-        target_cmd=("$DOTNET" "$harness_dll")
-    fi
+    # Muxer launch for both publish shapes; the app host breaks the SharpFuzz fork server
+    # on .NET 11 RC 1+ (see lib/afl-target.sh).
+        afl_resolve_target "$harness"
+    local target_cmd=("${TARGET_CMD[@]}")
 
     # Auto-detect dictionary
     local dict_args=()

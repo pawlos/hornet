@@ -21,6 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 export DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}"
 DOTNET="$DOTNET_ROOT/dotnet"
+# shellcheck source=lib/afl-target.sh
+source "$SCRIPT_DIR/lib/afl-target.sh"
 
 HARNESS_FILTER="${1:-}"
 AFL_TIMEOUT="${AFL_TIMEOUT:-5}"
@@ -66,13 +68,9 @@ triage_hangs_harness() {
         return
     fi
 
-    # Determine invocation (self-contained apphost or dotnet dll)
-    local target_cmd
-    if [ -f "$publish_dir/libcoreclr.so" ]; then
-        target_cmd=("$publish_dir/$harness_name" "$harness_dll")
-    else
-        target_cmd=("$DOTNET" "$harness_dll")
-    fi
+    # Launch as fuzz-afl.sh does (muxer for both publish shapes; see lib/afl-target.sh).
+    afl_resolve_target "$harness_name"
+    local target_cmd=("${TARGET_CMD[@]}")
 
     mkdir -p "$triage_dir"
 
