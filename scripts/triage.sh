@@ -9,6 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 export DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}"
 DOTNET="$DOTNET_ROOT/dotnet"
+# shellcheck source=lib/afl-target.sh
+source "$SCRIPT_DIR/lib/afl-target.sh"
 
 HARNESS_FILTER="${1:-}"
 MINIMIZE="${MINIMIZE:-0}"  # Set MINIMIZE=1 to run afl-tmin on unique crashes
@@ -52,13 +54,12 @@ triage_harness() {
         return
     fi
 
-    # Determine how to run the harness
-    local target_cmd
-    if [ -f "$publish_dir/libcoreclr.so" ]; then
-        target_cmd=("$publish_dir/$harness_name" "$harness_dll")
-    else
-        target_cmd=("$DOTNET" "$harness_dll")
-    fi
+    # Launch exactly as fuzz-afl.sh does: through the muxer for both publish shapes.
+    # Matters for afl-tmin (MINIMIZE=1): it runs a fork server, and an app-host launch on
+    # .NET 11 RC 1+ makes every execution die before the harness body (see afl-target.sh),
+    # so afl-tmin "minimizes" every crash to an empty file.
+    afl_resolve_target "$harness_name"
+    local target_cmd=("${TARGET_CMD[@]}")
 
     mkdir -p "$triage_dir"
 
