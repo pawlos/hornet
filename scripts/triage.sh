@@ -3,6 +3,11 @@
 # Usage: ./scripts/triage.sh [harness-name]
 #   If harness-name is omitted, triages all harnesses with crashes.
 #   Results are written to findings/<harness>/triage/
+# Env:
+#   MINIMIZE=1  run afl-tmin on each unique crash
+#   CMIN=1      coverage pre-filter: run afl-cmin -C over the crash files first and replay
+#               only the survivors. Cuts volume only; the stack-signature dedup below is
+#               still the real dedup. CMIN_TIMEOUT sets its per-exec timeout (ms, default 5000).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,6 +19,7 @@ source "$SCRIPT_DIR/lib/afl-target.sh"
 
 HARNESS_FILTER="${1:-}"
 MINIMIZE="${MINIMIZE:-0}"  # Set MINIMIZE=1 to run afl-tmin on unique crashes
+CMIN="${CMIN:-0}"          # Set CMIN=1 to pre-filter crash files with afl-cmin -C
 TIMEOUT=10  # seconds per replay
 
 # Colors
@@ -62,6 +68,14 @@ triage_harness() {
     local target_cmd=("${TARGET_CMD[@]}")
 
     mkdir -p "$triage_dir"
+
+    local cmin_stage=""
+    if [ "$CMIN" = "1" ]; then
+        # Under /tmp: /mnt/c can't ftruncate, and afl-cmin stages inputs in its out dir.
+        mkdir -p "${AFL_TMPDIR_BASE:-/tmp/afl-tmp}"
+        cmin_stage=$(mktemp -d "${AFL_TMPDIR_BASE:-/tmp/afl-tmp}/triage-cmin.$harness_name.XXXXXX")
+        cmin_crash_files "$harness_name" "$cmin_stage"
+    fi
 
     # Replay each crash and capture the stack trace
     declare -A seen_signatures
@@ -154,6 +168,45 @@ EOF
     echo -e "  ${GREEN}Summary: $unique_count unique bug(s) from ${#crash_files[@]} crash file(s)${NC}"
     echo -e "  Triage output: $triage_dir/"
     echo ""
+    [ -n "$cmin_stage" ] && rm -rf "$cmin_stage"
+}
+
+# CMIN=1 pre-filter. Copies crash_files (caller's array) into <stage>/in, runs afl-cmin -C
+# with the harness launched exactly as fuzz-afl.sh launches it, and on success replaces
+# crash_files with the survivors. On any failure crash_files is left as it was.
+cmin_crash_files() {
+    local harness_name="$1" stage="$2"
+    mkdir -p "$stage/in"
+    local f inst
+    for f in "${crash_files[@]}"; do
+        # Instances reuse AFL's id:NNNNNN names, so prefix with the instance dir.
+        inst=$(basename "$(dirname "$(dirname "$f")")")
+        cp "$f" "$stage/in/${inst}__$(basename "$f")"
+    done
+
+    echo -e "  ${CYAN}afl-cmin -C pre-filter over ${#crash_files[@]} crash file(s)...${NC}"
+    local rc=0
+    (
+        afl_resolve_target "$harness_name"
+        export AFL_TMPDIR="$stage/tmp"
+        afl_export_env "$harness_name"
+        export AFL_ALLOW_TMP=1
+        afl-cmin -C -i "$stage/in" -o "$stage/out" -t "${CMIN_TIMEOUT:-5000}" -m none \
+            -- "${TARGET_CMD[@]}"
+    ) > "$stage/cmin.log" 2>&1 || rc=$?
+
+    local survivors=()
+    if [ -d "$stage/out" ]; then
+        while IFS= read -r -d '' f; do survivors+=("$f"); done \
+            < <(find "$stage/out" -maxdepth 1 -type f ! -name '.*' -print0 | sort -z)
+    fi
+    if [ "$rc" -ne 0 ] || [ ${#survivors[@]} -eq 0 ]; then
+        echo -e "  ${YELLOW}afl-cmin failed (rc=$rc) or kept nothing; replaying all crash files. Log: tail of $stage/cmin.log${NC}"
+        tr '\r' '\n' < "$stage/cmin.log" | grep -v '^ *Processing\|^ *at \|^$' | tail -5 | sed 's/^/    /'
+        return
+    fi
+    echo -e "  ${GREEN}afl-cmin kept ${#survivors[@]} of ${#crash_files[@]} crash file(s)${NC}"
+    crash_files=("${survivors[@]}")
 }
 
 echo -e "${CYAN}=== Crash Triage ===${NC}"
