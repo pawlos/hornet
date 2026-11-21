@@ -225,35 +225,43 @@ export AFL_NO_UI=1
 export DOTNET_TieredCompilation=0
 export DOTNET_ReadyToRun=0
 
-# Kill any stray AFL++ or dotnet processes from previous runs.
-# Only kills processes owned by the current user.
+# Kill any stray AFL++ or harness processes from previous runs of this repo.
+# Matches on each process's executable and argv, not on a substring of its command
+# line: a `pkill -f` pattern also hit unrelated shells and editors whose command line
+# merely mentioned a harness name or a repo path (and this script itself when it was
+# started with an absolute path). Only processes owned by the current user.
+find_stray_pids() {
+    local pid exe argv1 cmd
+    for pid in $(pgrep -u "$(id -u)" .); do
+        [ "$pid" = "$$" ] && continue
+        exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || continue
+        cmd=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null) || continue
+        argv1=$(sed -n 2p <<<"$cmd")
+        case "$exe" in
+            */afl-fuzz)
+                # afl-fuzz writing into this repo's findings/
+                grep -qF -- "$ROOT_DIR/findings/" <<<"$cmd" && echo "$pid" ;;
+            "$ROOT_DIR"/publish/Harness.*)
+                echo "$pid" ;;  # self-contained app host
+            */dotnet)
+                case "$argv1" in "$ROOT_DIR"/publish/Harness.*) echo "$pid" ;; esac ;;
+        esac
+    done
+}
+
 cleanup_processes() {
-    local killed=0
-
-    # Kill afl-fuzz instances
-    if pkill -u "$(id -u)" -f "afl-fuzz" 2>/dev/null; then
-        killed=1
-    fi
-
-    # Kill orphaned dotnet processes running harness DLLs
-    if pkill -u "$(id -u)" -f "dotnet.*Harness\." 2>/dev/null; then
-        killed=1
-    fi
-
-    # Kill orphaned self-contained harness processes
-    if pkill -u "$(id -u)" -f "publish/Harness\." 2>/dev/null; then
-        killed=1
-    fi
-
-    if [ "$killed" -eq 1 ]; then
-        # Give processes time to exit
+    local pids
+    pids=$(find_stray_pids)
+    [ -z "$pids" ] || {
+        # shellcheck disable=SC2086
+        kill $pids 2>/dev/null || true
+        # Give processes time to exit, then force-kill survivors
         sleep 2
-        # Force-kill any survivors
-        pkill -9 -u "$(id -u)" -f "afl-fuzz" 2>/dev/null || true
-        pkill -9 -u "$(id -u)" -f "dotnet.*Harness\." 2>/dev/null || true
-        pkill -9 -u "$(id -u)" -f "publish/Harness\." 2>/dev/null || true
+        pids=$(find_stray_pids)
+        # shellcheck disable=SC2086
+        [ -z "$pids" ] || kill -9 $pids 2>/dev/null || true
         sleep 1
-    fi
+    }
 
     # Drop filesystem caches to reclaim memory (best-effort, needs root)
     if [ -w /proc/sys/vm/drop_caches ]; then
