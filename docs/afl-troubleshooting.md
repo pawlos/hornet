@@ -125,12 +125,12 @@ One or more seed inputs in the corpus don't trigger any new coverage beyond what
 
 **Fix:** This is usually harmless — AFL++ will skip redundant seeds. But for better performance:
 1. Remove duplicate or near-duplicate seeds from the corpus
-2. Use `afl-cmin` to minimize the corpus:
+2. Use `afl-cmin` to minimize the corpus, through the project script:
    ```bash
-   AFL_SKIP_BIN_CHECK=1 afl-cmin -i corpora/mytarget -o corpora/mytarget-min \
-       -- dotnet publish/<Harness>/<Harness>.dll
+   scripts/cmin.sh <Harness> corpora/mytarget            # writes corpora/mytarget-min
+   CMIN_TIMEOUT=10000 scripts/cmin.sh <Harness> corpora/mytarget /path/to/out
    ```
-   (`AFL_SKIP_BIN_CHECK=1` is required because the instrumentation is in the .NET DLL, not the `dotnet` binary)
+   It launches the harness exactly as `fuzz-afl.sh` does (muxer + harness `.dll`, same env: `AFL_SKIP_BIN_CHECK=1`, `AFL_TMPDIR` under `/tmp`, JIT knobs) via `scripts/lib/afl-target.sh`, and prints before/after file counts. `CMIN_EDGES=1` adds `-e`, `CMIN_CRASHES=1` adds `-C`. To pre-filter crash files before triage, use `CMIN=1 scripts/triage.sh <Harness>`.
 3. Ensure seeds are small and diverse (different formats, features, edge cases)
 
 ### "Instability detected"
